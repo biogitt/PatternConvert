@@ -10,7 +10,7 @@ public class DigiPatGenerator
     public void Generate(string outputPath, PatternInfo pattern,
         IReadOnlyList<Signal> enabledSignals, string? sourceFile = null)
     {
-        // build mapping: STIL name ? output pin name
+        // build mapping: STIL name -> output pin name
         var stilToPin = enabledSignals.ToDictionary(
             s => s.OriginalStilName, s => s.Name);
 
@@ -39,6 +39,10 @@ public class DigiPatGenerator
         w.WriteLine("{");
 
         // vectors
+        // The tester format prints a timeset name only when it differs from the
+        // previously emitted one; an unchanged timeset is written as "-". A row
+        // whose TimeSet is already "-" carries no change by construction.
+        string lastTimeSet = "";
         foreach (var row in pattern.Vectors)
         {
             // comment-only row
@@ -55,24 +59,40 @@ public class DigiPatGenerator
             // timeset + data
             var sb = new StringBuilder();
             sb.Append("                         ");
-            if (row.TimeSet != "-")
-                sb.Append(row.TimeSet.PadRight(32));
+            string tsToken;
+            if (row.TimeSet == "-" || row.TimeSet == lastTimeSet)
+            {
+                tsToken = "-";
+            }
             else
-                sb.Append("-".PadRight(32));
+            {
+                tsToken = row.TimeSet;
+                lastTimeSet = row.TimeSet;
+            }
+            sb.Append(tsToken.PadRight(32));
 
             foreach (var sig in enabledSignals)
             {
                 char val = row.Values.TryGetValue(sig.OriginalStilName, out var v) ? v : 'X';
-                // N (no-change) renders as X in the output
-                if (val == 'N') val = 'X';
-                // Z for bidir also renders as X in shift context unless it's really tri-state
-                sb.Append(val);
+                sb.Append(NormalizeSymbol(val));
                 sb.Append(' ');
             }
+            if (sb.Length > 0 && sb[^1] == ' ') sb.Length--;   // no space before ';'
             sb.Append(';');
-            w.WriteLine(sb.ToString().TrimEnd());
+            w.WriteLine(sb.ToString());
         }
 
         w.WriteLine("}");
     }
+
+    /// <summary>Map a STIL waveform character to the reduced tester symbol set
+    /// (0 1 H L M X). Pulse (P) renders as a static 1; tri-state / no-change /
+    /// compare-off states (Z, T, N) render as don't-care X. The force/measure
+    /// marker M is produced by the parser and passes through unchanged.</summary>
+    private static char NormalizeSymbol(char c) => c switch
+    {
+        'P' => '1',                  // pulse clock -> static 1
+        'Z' or 'T' or 'N' => 'X',    // tri-state / compare-off / no-change -> X
+        _ => c,
+    };
 }

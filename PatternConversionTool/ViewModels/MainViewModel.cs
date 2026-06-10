@@ -89,11 +89,38 @@ public class MainViewModel : INotifyPropertyChanged
 
         try
         {
-            var list = _csvService.ImportCsv(dlg.FileName);
-            Signals.Clear();
-            foreach (var s in list)
-                Signals.Add(s);
-            StatusText = $"Imported {list.Count} signals from {System.IO.Path.GetFileName(dlg.FileName)}.";
+            var mapping = _csvService.ImportCsv(dlg.FileName);
+
+            if (Signals.Count > 0)
+            {
+                // A STIL file is already loaded: use the 000/SIG file to filter
+                // and rename the existing signals. The "Remove?" column decides
+                // which signals are kept (Enabled) for conversion.
+                var current = Signals.ToList();
+                _csvService.ApplyMapping(current, mapping);
+
+                Signals.Clear();
+                // Kept signals first, in 000/SIG file order; excluded signals after.
+                foreach (var s in current
+                             .OrderByDescending(s => s.Enabled)
+                             .ThenBy(s => s.MappingOrder))
+                    Signals.Add(s);
+
+                int kept = current.Count(s => s.Enabled);
+                StatusText = $"Applied mapping from {System.IO.Path.GetFileName(dlg.FileName)}: " +
+                             $"{kept} of {current.Count} signals kept for conversion.";
+            }
+            else
+            {
+                // No STIL loaded yet: load the mapping rows directly, keeping only
+                // the signals flagged for conversion (Remove? == false).
+                Signals.Clear();
+                foreach (var s in mapping)
+                    Signals.Add(s);
+                int kept = mapping.Count(s => s.Enabled);
+                StatusText = $"Imported {mapping.Count} signals " +
+                             $"({kept} kept for conversion) from {System.IO.Path.GetFileName(dlg.FileName)}.";
+            }
         }
         catch (Exception ex)
         {

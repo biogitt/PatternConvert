@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="PatternConversionTool/PatternConversionTool.csproj" />
+  <Project Path="TestValidation/TestValidation.csproj" />
+</Solution>

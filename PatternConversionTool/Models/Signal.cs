@@ -12,6 +12,7 @@ public class Signal : INotifyPropertyChanged
     private string _group = "";
     private string _source = "";
     private string _originalStilName = "";
+    private int _mappingOrder = int.MaxValue;
 
     /// <summary>Display / alias name (editable).</summary>
     public string Name
@@ -60,6 +61,17 @@ public class Signal : INotifyPropertyChanged
     {
         get => _originalStilName;
         set { _originalStilName = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>
+    /// Position of this signal in the 000/SIG mapping file. Used to order the
+    /// kept signals in the generated output. <see cref="int.MaxValue"/> when the
+    /// signal is not referenced by a mapping file.
+    /// </summary>
+    public int MappingOrder
+    {
+        get => _mappingOrder;
+        set { _mappingOrder = value; OnPropertyChanged(); }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
