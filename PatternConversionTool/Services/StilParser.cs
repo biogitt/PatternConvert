@@ -22,6 +22,15 @@ public class StilParser : IStilParser
     private string[] _lines = [];
     private int _pos;
 
+    // Global label bookkeeping used to reproduce the reference tool's label
+    // de-duplication. Every label encountered during pattern expansion (the
+    // precondition, each "pattern N" call label, each load_unload's internal
+    // "Internal_scan_pre_shift" label and the capture labels) advances
+    // _labelOrdinal. When a label name repeats, a "_N" suffix is appended where
+    // N is the ordinal of the capture's first label.
+    private int _labelOrdinal;
+    private readonly HashSet<string> _seenLabels = new(StringComparer.Ordinal);
+
     /// <summary>
     /// Optional cap on the number of expanded vector rows. A value of 0 (the
     /// default) means unlimited. Useful for previewing / diffing only the first
@@ -35,6 +44,8 @@ public class StilParser : IStilParser
     {
         _lines = File.ReadAllLines(filePath);
         _pos = 0;
+        _labelOrdinal = 0;
+        _seenLabels.Clear();
 
         while (_pos < _lines.Length)
         {
@@ -253,7 +264,7 @@ public class StilParser : IStilParser
             if (MaxVectors > 0 && pat.Vectors.Count >= MaxVectors) break;
 
             string line = _lines[_pos].Trim();
-            if (line == "}") break;
+            if (line == "}") { pat.IsComplete = true; break; }
             if (line == "{") { _pos++; continue; }
 
             // W "wft";
@@ -303,7 +314,9 @@ public class StilParser : IStilParser
                 }
 
                 // precondition produces 2 identical lines
-                pat.Vectors.Add(MakeRow(cur, curWFT, label?.Replace(" ", "") ?? "preconditionallSignals"));
+                int preOrd = ++_labelOrdinal;
+                string preLabel = DedupLabel(label ?? "precondition all Signals", preOrd);
+                pat.Vectors.Add(MakeRow(cur, curWFT, preLabel));
                 pat.Vectors.Add(MakeRow(cur, null, null));
                 continue;   // ReadCallBody already advanced _pos
             }
@@ -408,8 +421,14 @@ public class StilParser : IStilParser
 
         int len = Math.Max(siData.Length, soData.Length);
 
-        // label row
-        string? labelStr = patternLabel?.Replace(" ", "");
+        // The "pattern N" call label and the procedure's own labeled statement
+        // (e.g. "Internal_scan_pre_shift") both advance the global label ordinal,
+        // even though only the call label is emitted on the pre-shift vector.
+        int patternOrd = ++_labelOrdinal;                 // "pattern N" call label
+        string? labelStr = patternLabel != null
+            ? DedupLabel(patternLabel, patternOrd) : null;
+        foreach (Match _ in Regex.Matches(proc.Body, @"""([^""]+)""\s*:\s*V\s*\{"))
+            _labelOrdinal++;                              // internal proc label(s)
 
         // first vector: pre-shift state
         pat.Vectors.Add(MakeRow(cur, curWFT, labelStr));
@@ -465,8 +484,13 @@ public class StilParser : IStilParser
             // tri-stated (Z) during an iddq force/measure vector.
             var siSigs = Grp("_si");
             bool first = true;
+            int prevEnd = 0;   // end of the previous labeled V in the body text
+            // Both capture labels (force / measure) advance the global ordinal but
+            // share the first label's ordinal when a duplicate suffix is needed.
+            int captureBaseOrd = _labelOrdinal + 1;
             foreach (Match v in labeledV)
             {
+                _labelOrdinal++;   // every labeled V advances the global count
                 // Apply the call data for whichever group this V references.
                 // Output-compare data (the "_po" group) is not compared during an
                 // iddq force/measure point, so the precondition mask (_po = X set
@@ -484,14 +508,25 @@ public class StilParser : IStilParser
                     if (rowState.TryGetValue(si, out var c) && (c == 'Z' || c == 'T'))
                         rowState[si] = 'M';
 
-                string label = v.Groups[1].Value.Replace(" ", "");
+                // An "IddqTestPoint;" statement that appears in the body between the
+                // previous labeled V and this one marks an IDDQ measure vector; flag
+                // the row so the generator emits the "// IddqTestPoint at cycle N"
+                // comment the reference tool produces.
+                string gap = v.Index > prevEnd
+                    ? proc.Body.Substring(prevEnd, v.Index - prevEnd)
+                    : "";
+                bool iddq = Regex.IsMatch(gap, @"\bIddqTestPoint\b");
+
+                string label = DedupLabel(v.Groups[1].Value, captureBaseOrd);
                 pat.Vectors.Add(new VectorRow
                 {
                     TimeSet = first ? wft : "-",
                     Values = rowState,
-                    Label = label
+                    Label = label,
+                    IddqTestPoint = iddq
                 });
                 first = false;
+                prevEnd = v.Index + v.Length;
             }
         }
         else
@@ -531,6 +566,17 @@ public class StilParser : IStilParser
         foreach (Match m in Regex.Matches(body, @"""([^""]+)""\s*=\s*([0-9A-Za-z#]+)\s*;"))
             result[m.Groups[1].Value] = m.Groups[2].Value;
         return result;
+    }
+
+    /// <summary>Return the unique form of a label name. The first use of a name
+    /// is kept verbatim; any later use is suffixed with "_N" where N is the
+    /// supplied ordinal, matching the reference tool's de-duplication. Ordinal
+    /// bookkeeping (<see cref="_labelOrdinal"/>) is managed by the caller so the
+    /// running count includes labels that are consumed but not emitted.</summary>
+    private string DedupLabel(string name, int suffixOrdinal)
+    {
+        string flat = name.Replace(" ", "");
+        return _seenLabels.Add(flat) ? flat : $"{flat}_{suffixOrdinal}";
     }
 
     // ?? helpers ?????????????????????????????????????????????????????

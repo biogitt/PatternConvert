@@ -42,9 +42,22 @@ public class DigiPatGenerator
         // The tester format prints a timeset name only when it differs from the
         // previously emitted one; an unchanged timeset is written as "-". A row
         // whose TimeSet is already "-" carries no change by construction.
-        string lastTimeSet = "";
-        foreach (var row in pattern.Vectors)
+        // The final data vector is prefixed with the end-of-pattern "halt" marker.
+        int lastDataIndex = -1;
+        for (int i = pattern.Vectors.Count - 1; i >= 0; i--)
         {
+            var rw = pattern.Vectors[i];
+            if (!(rw.Comment != null && rw.Values.Count == 0)) { lastDataIndex = i; break; }
+        }
+        // Only mark the terminal vector when the whole pattern was expanded; a
+        // capped / truncated parse must not emit a premature halt.
+        if (!pattern.IsComplete) lastDataIndex = -1;
+
+        string lastTimeSet = "";
+        int vectorCount = 0;   // running count of emitted data vectors
+        for (int i = 0; i < pattern.Vectors.Count; i++)
+        {
+            var row = pattern.Vectors[i];
             // comment-only row
             if (row.Comment != null && row.Values.Count == 0)
             {
@@ -52,13 +65,19 @@ public class DigiPatGenerator
                 continue;
             }
 
+            // An IDDQ measure vector is preceded by a "// IddqTestPoint at cycle N"
+            // comment, where N is the number of vectors emitted before it.
+            if (row.IddqTestPoint)
+                w.WriteLine($"// IddqTestPoint at cycle {vectorCount}");
+
             // label
             if (row.Label != null)
                 w.WriteLine($"{row.Label}:");
 
-            // timeset + data
+            // timeset + data. The 25-column indent is replaced by the left-aligned
+            // "halt" keyword on the very last vector of the pattern.
             var sb = new StringBuilder();
-            sb.Append("                         ");
+            sb.Append(i == lastDataIndex ? "halt".PadRight(25) : new string(' ', 25));
             string tsToken;
             if (row.TimeSet == "-" || row.TimeSet == lastTimeSet)
             {
@@ -80,6 +99,7 @@ public class DigiPatGenerator
             if (sb.Length > 0 && sb[^1] == ' ') sb.Length--;   // no space before ';'
             sb.Append(';');
             w.WriteLine(sb.ToString());
+            vectorCount++;
         }
 
         w.WriteLine("}");

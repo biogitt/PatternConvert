@@ -12,6 +12,11 @@ public class PatternInfo
 
     /// <summary>Flat list of expanded vector rows.</summary>
     public List<VectorRow> Vectors { get; set; } = new();
+
+    /// <summary>True when expansion reached the natural end of the Pattern block
+    /// (as opposed to being truncated by a vector cap). The generator only emits
+    /// the end-of-pattern <c>halt</c> marker when the pattern is complete.</summary>
+    public bool IsComplete { get; set; }
 }
 
 /// <summary>
@@ -30,4 +35,9 @@ public class VectorRow
 
     /// <summary>Optional comment printed before this row.</summary>
     public string? Comment { get; set; }
+
+    /// <summary>True when an STIL <c>IddqTestPoint;</c> marker precedes this row.
+    /// The generator emits a <c>// IddqTestPoint at cycle N</c> comment before the
+    /// row's label, where N is the running count of vectors emitted so far.</summary>
+    public bool IddqTestPoint { get; set; }
 }
