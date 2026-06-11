@@ -12,6 +12,10 @@
         <vm:MainViewModel />
     </Window.DataContext>
 
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+    </Window.Resources>
+
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -52,7 +56,28 @@
         </DataGrid>
 
         <!-- Status bar -->
-        <TextBlock Grid.Row="2" Text="{Binding StatusText}" Margin="0,6,0,0"
-                   TextWrapping="Wrap"/>
+        <Grid Grid.Row="2" Margin="0,6,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <TextBlock Grid.Column="0" Text="{Binding StatusText}"
+                       TextWrapping="Wrap" VerticalAlignment="Center"/>
+
+            <!-- Generation progress: "line xxx/xxxx" with a bar -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding ProgressVisible,
+                            Converter={StaticResource BoolToVisibility}}">
+                <TextBlock Text="{Binding ProgressText}" VerticalAlignment="Center"
+                           Margin="0,0,8,0" MinWidth="140" TextAlignment="Right"/>
+                <ProgressBar Width="220" Height="16"
+                             Minimum="0"
+                             Maximum="{Binding ProgressMaximum}"
+                             Value="{Binding ProgressValue}"/>
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>
+

@@ -22,11 +22,49 @@ public class StilParser : IStilParser
     private string[] _lines = [];
     private int _pos;
 
-    // ?? public entry point ??????????????????????????????????????????
-    public StilParseResult Parse(string filePath)
+    // Global label bookkeeping used to reproduce the reference tool's label
+    // de-duplication. Every label encountered during pattern expansion (the
+    // precondition, each "pattern N" call label, each load_unload's internal
+    // "Internal_scan_pre_shift" label and the capture labels) advances
+    // _labelOrdinal. When a label name repeats, a "_N" suffix is appended where
+    // N is the ordinal of the capture's first label.
+    private int _labelOrdinal;
+    private readonly HashSet<string> _seenLabels = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Optional cap on the number of expanded vector rows. A value of 0 (the
+    /// default) means unlimited. Useful for previewing / diffing only the first
+    /// portion of a very large pattern without materialising every vector in
+    /// memory.
+    /// </summary>
+    public int MaxVectors { get; set; }
+
+    /// <summary>
+    /// Optional sink for expanded vector rows. When set, <see cref="ParsePattern"/>
+    /// streams each row to this callback instead of collecting them in
+    /// <see cref="PatternInfo.Vectors"/>, keeping memory flat for huge patterns.
+    /// </summary>
+    private Action<VectorRow>? _rowSink;
+    private int _emittedRows;
+
+    /// <summary>Emit one expanded row: either stream it to the sink or collect it
+    /// in the pattern's vector list when no sink is attached.</summary>
+    private void Emit(PatternInfo pat, VectorRow row)
     {
+        _emittedRows++;
+        if (_rowSink != null) _rowSink(row);
+        else pat.Vectors.Add(row);
+    }
+
+    /// <summary>Number of rows expanded so far (whether streamed or collected).
+    /// Lets the streaming caller bound the work and report progress.</summary>
+    private int EmittedRows => _emittedRows;
+
+    // ?? public entry point ??????????????????????????????????????????
+    public StilParseResult Parse(string filePath, bool expandPattern = true)
+    {
+        ResetState();
         _lines = File.ReadAllLines(filePath);
-        _pos = 0;
 
         while (_pos < _lines.Length)
         {
@@ -36,10 +74,44 @@ public class StilParser : IStilParser
             else if (line.StartsWith("Timing"))  ParseTiming();
             else if (line.StartsWith("Procedures")) ParseProcedures();
             else if (line.StartsWith("MacroDefs"))  ParseMacroDefs();
-            else if (Regex.IsMatch(line, @"^Pattern\s+""")) return BuildResult(filePath);
+            else if (Regex.IsMatch(line, @"^Pattern\s+""")) return BuildResult(filePath, expandPattern);
             else _pos++;
         }
-        return BuildResult(filePath);
+        return BuildResult(filePath, expandPattern);
+    }
+
+    /// <summary>Parse a STIL file, streaming each expanded vector row to
+    /// <paramref name="rowSink"/> rather than collecting them. Keeps memory flat
+    /// for patterns with millions of cycles.</summary>
+    public StilParseResult ParseStreaming(string filePath, Action<VectorRow> rowSink)
+    {
+        _rowSink = rowSink;
+        try
+        {
+            return Parse(filePath, expandPattern: true);
+        }
+        finally
+        {
+            _rowSink = null;
+        }
+    }
+
+    private void ResetState()
+    {
+        _pos = 0;
+        _labelOrdinal = 0;
+        _emittedRows = 0;
+        _seenLabels.Clear();
+
+        // Reset intermediate state so the parser can be reused safely (e.g. a
+        // fast metadata-only load in the UI followed by a full parse at generate).
+        _signals.Clear();
+        _groups.Clear();
+        _timeSets.Clear();
+        _timeSetOrder.Clear();
+        _procedures.Clear();
+        _macroDefs.Clear();
+        _ioWfcMap.Clear();
     }
 
     // ?? Signals { � } ??????????????????????????????????????????????
@@ -184,11 +256,12 @@ public class StilParser : IStilParser
     // Instead of storing a raw AST we expand directly into VectorRows
     // which makes the generator trivial.
 
-    private StilParseResult BuildResult(string filePath)
+    private StilParseResult BuildResult(string filePath, bool expandPattern = true)
     {
         var pattern = new PatternInfo
         {
-            TimeSetOrder = new List<string>(_timeSetOrder)
+            TimeSetOrder = new List<string>(_timeSetOrder),
+            EstimatedCycles = ReadEstimatedCycles()
         };
 
         // try to find Pattern block and expand it
@@ -198,8 +271,15 @@ public class StilParser : IStilParser
             {
                 var nm = Regex.Match(_lines[i], @"""([^""]+)""");
                 if (nm.Success) pattern.PatternName = nm.Groups[1].Value;
-                _pos = i + 1;
-                ExpandPattern(pattern);
+
+                // Skip the (potentially huge) vector expansion when only the
+                // configuration is needed. The pattern name above is still
+                // captured cheaply for naming the output files.
+                if (expandPattern)
+                {
+                    _pos = i + 1;
+                    ExpandPattern(pattern);
+                }
                 break;
             }
         }
@@ -231,19 +311,35 @@ public class StilParser : IStilParser
     private List<string> Grp(string name) =>
         _groups.TryGetValue(name, out var g) ? g : [];
 
+    /// <summary>Read the approximate cycle count from the STIL footer annotation
+    /// "Patterns reference N V statements, generating M test cycles". Returns 0
+    /// when not present. Scans from the end since the comment is near the bottom.</summary>
+    private long ReadEstimatedCycles()
+    {
+        for (int i = _lines.Length - 1; i >= 0 && i > _lines.Length - 200; i--)
+        {
+            var m = Regex.Match(_lines[i], @"generating\s+(\d+)\s+test\s+cycles");
+            if (m.Success && long.TryParse(m.Groups[1].Value, out var n))
+                return n;
+        }
+        return 0;
+    }
+
     // ?? expand Pattern block into flat VectorRows ??????????????????
     private void ExpandPattern(PatternInfo pat)
     {
         // Per-signal current state (STIL signal names)
-        var cur = new Dictionary<string, char>(); string? _pendingLabel = null;
+        var cur = new Dictionary<string, char>();
         foreach (var s in _signals) cur[s.Name] = 'X';
 
         string curWFT = "_default_WFT_";
 
         while (_pos < _lines.Length)
         {
+            if (MaxVectors > 0 && EmittedRows >= MaxVectors) break;
+
             string line = _lines[_pos].Trim();
-            if (line == "}") break;
+            if (line == "}") { pat.IsComplete = true; break; }
             if (line == "{") { _pos++; continue; }
 
             // W "wft";
@@ -254,7 +350,7 @@ public class StilParser : IStilParser
             var am = Regex.Match(line, @"Ann\s*\{\*\s*(.+?)\s*\*\}");
             if (am.Success)
             {
-                pat.Vectors.Add(new VectorRow { Comment = am.Groups[1].Value });
+                Emit(pat, new VectorRow { Comment = am.Groups[1].Value });
                 _pos++; continue;
             }
 
@@ -266,19 +362,38 @@ public class StilParser : IStilParser
                 _pos++; continue;
             }
 
-            // "label": C { � }  or  C { � }   (precondition)
+            // "label": C { ... }   (precondition, may span multiple lines)
             if (line.Contains("C {") && !line.Contains("Call"))
             {
                 string? label = null;
                 var lm = Regex.Match(line, @"""([^""]+)""\s*:");
                 if (lm.Success) label = lm.Groups[1].Value;
 
-                ApplyCondition(line, cur);
+                // Read the full (possibly multi-line) C block and apply it.
+                string cBody = ReadCallBody();   // advances _pos past the statement
+                var cm = Regex.Match(cBody, @"C\s*\{(.+)\}", RegexOptions.Singleline);
+                if (cm.Success) ApplyAssignments(cm.Groups[1].Value, cur);
+
+                // The reference tool merges the immediately-following setup macro
+                // into the precondition, so peek ahead and apply its state + WFT
+                // before emitting (the macro line is still processed normally and
+                // re-applying the same state is idempotent).
+                int look = _pos;
+                while (look < _lines.Length)
+                {
+                    string nxt = _lines[look].Trim();
+                    if (nxt.Length == 0 || nxt.StartsWith("Ann")) { look++; continue; }
+                    var mp = Regex.Match(nxt, @"^Macro\s+""([^""]+)""");
+                    if (mp.Success) ExpandMacro(mp.Groups[1].Value, cur, ref curWFT, pat);
+                    break;
+                }
+
                 // precondition produces 2 identical lines
-                string wft = curWFT;
-                pat.Vectors.Add(MakeRow(cur, wft, label?.Replace(" ", "") ?? "preconditionallSignals"));
-                pat.Vectors.Add(MakeRow(cur, null, null));
-                _pos++; continue;
+                int preOrd = ++_labelOrdinal;
+                string preLabel = DedupLabel(label ?? "precondition all Signals", preOrd);
+                Emit(pat, MakeRow(cur, curWFT, preLabel));
+                Emit(pat, MakeRow(cur, null, null));
+                continue;   // ReadCallBody already advanced _pos
             }
 
             // "pattern N": Call "proc" { � }  or  Call "proc" { � }
@@ -375,13 +490,23 @@ public class StilParser : IStilParser
         foreach (var so in soSigs)
             if (scanData.TryGetValue(so, out var d)) soData = d;
 
+        // When an unload provides only scan-out data (no scan-in), the scan-input
+        // pin is driven low during the shift rather than left tri-stated.
+        bool siDriven = siData.Length > 0;
+
         int len = Math.Max(siData.Length, soData.Length);
 
-        // label row
-        string? labelStr = patternLabel?.Replace(" ", "");
+        // The "pattern N" call label and the procedure's own labeled statement
+        // (e.g. "Internal_scan_pre_shift") both advance the global label ordinal,
+        // even though only the call label is emitted on the pre-shift vector.
+        int patternOrd = ++_labelOrdinal;                 // "pattern N" call label
+        string? labelStr = patternLabel != null
+            ? DedupLabel(patternLabel, patternOrd) : null;
+        foreach (Match _ in Regex.Matches(proc.Body, @"""([^""]+)""\s*:\s*V\s*\{"))
+            _labelOrdinal++;                              // internal proc label(s)
 
         // first vector: pre-shift state
-        pat.Vectors.Add(MakeRow(cur, curWFT, labelStr));
+        Emit(pat, MakeRow(cur, curWFT, labelStr));
 
         // shift vectors
         for (int bit = 0; bit < len; bit++)
@@ -391,13 +516,16 @@ public class StilParser : IStilParser
 
             // SI data
             foreach (var si in siSigs)
+            {
                 if (bit < siData.Length) cur[si] = siData[bit];
+                else if (!siDriven) cur[si] = '0';
+            }
 
             // SO data
             foreach (var so in soSigs)
                 if (bit < soData.Length) cur[so] = soData[bit];
 
-            pat.Vectors.Add(MakeRow(cur, null, null));
+            Emit(pat, MakeRow(cur, null, null));
         }
     }
 
@@ -416,11 +544,114 @@ public class StilParser : IStilParser
         foreach (Match fm in Regex.Matches(proc.Body, @"F\s*\{([^}]+)\}"))
             ApplyAssignments(fm.Groups[1].Value, cur);
 
-        // apply call arguments
-        ApplyCallArgs(callBody, cur);
+        // Inline call arguments (e.g. "_pi"=...; "_po"=...;) keyed by group.
+        var args = ParseInlineArgs(callBody);
 
-        pat.Vectors.Add(MakeRow(cur, wft, null));
+        // Labeled V statements inside the capture procedure produce one tester
+        // vector each (e.g. "forcePI", "measurePO measureIDDQ"). The label drives
+        // the force/measure action marker that the generator inserts.
+        var labeledV = Regex.Matches(proc.Body,
+            @"""([^""]+)""\s*:\s*V\s*\{([^}]*)\}");
+
+        if (labeledV.Count > 0)
+        {
+            // Scan-input pins become the force/measure marker "M" when they are
+            // tri-stated (Z) during an iddq force/measure vector.
+            var siSigs = Grp("_si");
+            bool first = true;
+            int prevEnd = 0;   // end of the previous labeled V in the body text
+            // Both capture labels (force / measure) advance the global ordinal but
+            // share the first label's ordinal when a duplicate suffix is needed.
+            int captureBaseOrd = _labelOrdinal + 1;
+            foreach (Match v in labeledV)
+            {
+                _labelOrdinal++;   // every labeled V advances the global count
+                // Apply the call data for whichever group this V references.
+                // Output-compare data (the "_po" group) is not compared during an
+                // iddq force/measure point, so the precondition mask (_po = X set
+                // by the procedure C statement) is kept instead.
+                foreach (Match g in Regex.Matches(v.Groups[2].Value, @"""([^""]+)"""))
+                {
+                    string grp = g.Groups[1].Value;
+                    if (grp == "_po") continue;
+                    if (args.TryGetValue(grp, out var data))
+                        ApplyGroupOrSignal(grp, data, cur);
+                }
+
+                var rowState = new Dictionary<string, char>(cur);
+                foreach (var si in siSigs)
+                    if (rowState.TryGetValue(si, out var c) && (c == 'Z' || c == 'T'))
+                        rowState[si] = 'M';
+
+                // An "IddqTestPoint;" statement that appears in the body between the
+                // previous labeled V and this one marks an IDDQ measure vector; flag
+                // the row so the generator emits the "// IddqTestPoint at cycle N"
+                // comment the reference tool produces.
+                string gap = v.Index > prevEnd
+                    ? proc.Body.Substring(prevEnd, v.Index - prevEnd)
+                    : "";
+                bool iddq = Regex.IsMatch(gap, @"\bIddqTestPoint\b");
+
+                string label = DedupLabel(v.Groups[1].Value, captureBaseOrd);
+                Emit(pat, new VectorRow
+                {
+                    TimeSet = first ? wft : "-",
+                    Values = rowState,
+                    Label = label,
+                    IddqTestPoint = iddq
+                });
+                first = false;
+                prevEnd = v.Index + v.Length;
+            }
+        }
+        else
+        {
+            // Unlabeled capture (e.g. multiclock_capture): single vector.
+            ApplyCallArgs(callBody, cur);
+
+            // A bidirectional scan-control pin that is not driven during capture
+            // (its WFC is a compare-off / tri-state state, T or Z) is measured by
+            // the tester and rendered with the force/measure marker "M". Clocks
+            // (the _clk group) keep their resolved level and are handled below.
+            var clkSet = new HashSet<string>(Grp("_clk"));
+            var measured = new HashSet<string>(Grp("_si"));
+            foreach (var io in Grp("_io"))
+                if (!clkSet.Contains(io)) measured.Add(io);
+            foreach (var sig in measured)
+                if (cur.TryGetValue(sig, out var c) && (c == 'T' || c == 'Z'))
+                    cur[sig] = 'M';
+
+            // Resolve a pulse (P) on each clock/launch pin to the static level the
+            // tester applies for that waveform: the pulse's active (mid) edge. A
+            // clock idle-low/pulse-high renders 1, an idle-high/pulse-low renders 0.
+            foreach (var clk in clkSet)
+                if (cur.TryGetValue(clk, out var c) && c == 'P')
+                    cur[clk] = PulseLevel(clk, wft);
+
+            Emit(pat, MakeRow(cur, wft, null));
+        }
+
         curWFT = wft;
+    }
+
+    /// <summary>Parse inline "group"=value; assignments from a call body.</summary>
+    private static Dictionary<string, string> ParseInlineArgs(string body)
+    {
+        var result = new Dictionary<string, string>();
+        foreach (Match m in Regex.Matches(body, @"""([^""]+)""\s*=\s*([0-9A-Za-z#]+)\s*;"))
+            result[m.Groups[1].Value] = m.Groups[2].Value;
+        return result;
+    }
+
+    /// <summary>Return the unique form of a label name. The first use of a name
+    /// is kept verbatim; any later use is suffixed with "_N" where N is the
+    /// supplied ordinal, matching the reference tool's de-duplication. Ordinal
+    /// bookkeeping (<see cref="_labelOrdinal"/>) is managed by the caller so the
+    /// running count includes labels that are consumed but not emitted.</summary>
+    private string DedupLabel(string name, int suffixOrdinal)
+    {
+        string flat = name.Replace(" ", "");
+        return _seenLabels.Add(flat) ? flat : $"{flat}_{suffixOrdinal}";
     }
 
     // ?? helpers ?????????????????????????????????????????????????????
@@ -473,7 +704,10 @@ public class StilParser : IStilParser
             if (curSig != null && data != null)
             {
                 string dl = l.TrimEnd(';').Trim();
-                if (dl.Length > 0 && Regex.IsMatch(dl, @"^[01LHXTZN]+$"))
+                // Accept all STIL waveform characters: 0/1, U/D (force up/down),
+                // Z (force off), H/L (compare high/low), T (compare off),
+                // X (compare unknown / don't-care), P (pulse), N (unknown input).
+                if (dl.Length > 0 && Regex.IsMatch(dl, @"^[01UDZHLTXPN]+$"))
                     data.Append(dl);
                 if (l.Contains(';'))
                 {
@@ -537,13 +771,41 @@ public class StilParser : IStilParser
         }
     }
 
+    /// <summary>Resolve the static level the tester applies for a pulse (P) on a
+    /// given signal in a capture vector. A pulse is defined by three edges in the
+    /// WaveformTable (idle, active, idle); the rendered value is the active (mid)
+    /// edge: an idle-low/pulse-high clock renders 1, an idle-high/pulse-low one
+    /// renders 0. Falls back to 1 when no waveform definition is found.</summary>
+    private char PulseLevel(string signal, string wftName)
+    {
+        var ts = _timeSets.FirstOrDefault(t => t.Name == wftName);
+        if (ts != null)
+        {
+            var wf = ts.Waveforms.FirstOrDefault(w =>
+                w.WFC == 'P' &&
+                (w.SignalOrGroup == signal ||
+                 (_groups.TryGetValue(w.SignalOrGroup, out var g) && g.Contains(signal))));
+            if (wf != null && wf.Edges.Count >= 2)
+            {
+                // active (mid) edge: U -> 1, D -> 0
+                char act = wf.Edges[wf.Edges.Count / 2].Action;
+                if (act == 'U') return '1';
+                if (act == 'D') return '0';
+            }
+        }
+        return '1';
+    }
+
     private static string ExpandRepeat(string s)
     {
         // \j = keep current (empty), \rN C = repeat C N times
         s = Regex.Replace(s, @"\\j\s*", "");
         s = Regex.Replace(s, @"\\r(\d+)\s+(\S)", m =>
             new string(m.Groups[2].Value[0], int.Parse(m.Groups[1].Value)));
-        return s.Trim();
+        // A WFC value is a positional string with one character per signal; the
+        // token separators left over from \rN expansion would otherwise shift
+        // every subsequent signal by one column, so strip all whitespace.
+        return Regex.Replace(s, @"\s+", "");
     }
 
     private VectorRow MakeRow(Dictionary<string, char> cur, string? wft, string? label)
