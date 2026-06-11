@@ -40,12 +40,22 @@ public class StilParser : IStilParser
     public int MaxVectors { get; set; }
 
     // ?? public entry point ??????????????????????????????????????????
-    public StilParseResult Parse(string filePath)
+    public StilParseResult Parse(string filePath, bool expandPattern = true)
     {
         _lines = File.ReadAllLines(filePath);
         _pos = 0;
         _labelOrdinal = 0;
         _seenLabels.Clear();
+
+        // Reset intermediate state so the parser can be reused safely (e.g. a
+        // fast metadata-only load in the UI followed by a full parse at generate).
+        _signals.Clear();
+        _groups.Clear();
+        _timeSets.Clear();
+        _timeSetOrder.Clear();
+        _procedures.Clear();
+        _macroDefs.Clear();
+        _ioWfcMap.Clear();
 
         while (_pos < _lines.Length)
         {
@@ -55,10 +65,10 @@ public class StilParser : IStilParser
             else if (line.StartsWith("Timing"))  ParseTiming();
             else if (line.StartsWith("Procedures")) ParseProcedures();
             else if (line.StartsWith("MacroDefs"))  ParseMacroDefs();
-            else if (Regex.IsMatch(line, @"^Pattern\s+""")) return BuildResult(filePath);
+            else if (Regex.IsMatch(line, @"^Pattern\s+""")) return BuildResult(filePath, expandPattern);
             else _pos++;
         }
-        return BuildResult(filePath);
+        return BuildResult(filePath, expandPattern);
     }
 
     // ?? Signals { � } ??????????????????????????????????????????????
@@ -203,7 +213,7 @@ public class StilParser : IStilParser
     // Instead of storing a raw AST we expand directly into VectorRows
     // which makes the generator trivial.
 
-    private StilParseResult BuildResult(string filePath)
+    private StilParseResult BuildResult(string filePath, bool expandPattern = true)
     {
         var pattern = new PatternInfo
         {
@@ -217,8 +227,15 @@ public class StilParser : IStilParser
             {
                 var nm = Regex.Match(_lines[i], @"""([^""]+)""");
                 if (nm.Success) pattern.PatternName = nm.Groups[1].Value;
-                _pos = i + 1;
-                ExpandPattern(pattern);
+
+                // Skip the (potentially huge) vector expansion when only the
+                // configuration is needed. The pattern name above is still
+                // captured cheaply for naming the output files.
+                if (expandPattern)
+                {
+                    _pos = i + 1;
+                    ExpandPattern(pattern);
+                }
                 break;
             }
         }

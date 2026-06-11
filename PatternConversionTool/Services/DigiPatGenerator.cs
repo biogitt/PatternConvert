@@ -8,7 +8,8 @@ namespace PatternConversionTool.Services;
 public class DigiPatGenerator
 {
     public void Generate(string outputPath, PatternInfo pattern,
-        IReadOnlyList<Signal> enabledSignals, string? sourceFile = null)
+        IReadOnlyList<Signal> enabledSignals, string? sourceFile = null,
+        IProgress<(int current, int total)>? progress = null)
     {
         // build mapping: STIL name -> output pin name
         var stilToPin = enabledSignals.ToDictionary(
@@ -55,8 +56,13 @@ public class DigiPatGenerator
 
         string lastTimeSet = "";
         int vectorCount = 0;   // running count of emitted data vectors
+        int total = pattern.Vectors.Count;
         for (int i = 0; i < pattern.Vectors.Count; i++)
         {
+            // Report progress (throttled) so the UI can show "line xxx/xxxx".
+            if (progress != null && (i % 2000 == 0 || i == total - 1))
+                progress.Report((i + 1, total));
+
             var row = pattern.Vectors[i];
             // comment-only row
             if (row.Comment != null && row.Values.Count == 0)
@@ -102,6 +108,7 @@ public class DigiPatGenerator
             vectorCount++;
         }
 
+        progress?.Report((total, total));
         w.WriteLine("}");
     }
 

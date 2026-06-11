@@ -13,7 +13,13 @@ public class MainViewModel : INotifyPropertyChanged
     private readonly ISignalConfigService _csvService;
 
     private StilParseResult? _parseResult;
+    private string? _stilFilePath;
     private string _statusText = "Ready.";
+
+    private bool _progressVisible;
+    private double _progressValue;
+    private double _progressMaximum = 1;
+    private string _progressText = "";
 
     public ObservableCollection<Signal> Signals { get; } = new();
 
@@ -21,6 +27,34 @@ public class MainViewModel : INotifyPropertyChanged
     {
         get => _statusText;
         set { _statusText = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>Whether the progress indicator is shown (only during generation).</summary>
+    public bool ProgressVisible
+    {
+        get => _progressVisible;
+        set { _progressVisible = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>Current progress value (number of lines processed).</summary>
+    public double ProgressValue
+    {
+        get => _progressValue;
+        set { _progressValue = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>Total number of lines to process.</summary>
+    public double ProgressMaximum
+    {
+        get => _progressMaximum;
+        set { _progressMaximum = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>Human-readable progress label, e.g. "line 1234/56789".</summary>
+    public string ProgressText
+    {
+        get => _progressText;
+        set { _progressText = value; OnPropertyChanged(); }
     }
 
     // ?? commands ????????????????????????????????????????????????????
@@ -57,15 +91,19 @@ public class MainViewModel : INotifyPropertyChanged
         try
         {
             StatusText = "Parsing STIL…";
-            _parseResult = _parser.Parse(dlg.FileName);
+            // Load only the configuration (signals, groups, timing) for the UI.
+            // The large Pattern block is expanded later, at generation time, so
+            // opening a big STIL file stays fast.
+            _stilFilePath = dlg.FileName;
+            _parseResult = _parser.Parse(dlg.FileName, expandPattern: false);
 
             Signals.Clear();
             foreach (var s in _parseResult.Signals)
                 Signals.Add(s);
 
             StatusText = $"Parsed {_parseResult.Signals.Count} signals, " +
-                         $"{_parseResult.Timing.TimeSets.Count} timesets, " +
-                         $"{_parseResult.Pattern.Vectors.Count} vectors.";
+                         $"{_parseResult.Timing.TimeSets.Count} timesets. " +
+                         $"Pattern loaded on generate.";
         }
         catch (Exception ex)
         {
@@ -190,10 +228,31 @@ public class MainViewModel : INotifyPropertyChanged
                 ? "output"
                 : _parseResult.Pattern.PatternName);
 
+        // Created on the UI thread, so Report callbacks marshal back to it and can
+        // safely update the bound progress properties.
+        var progress = new Progress<(int current, int total)>(p =>
+        {
+            ProgressMaximum = p.total;
+            ProgressValue = p.current;
+            ProgressText = $"line {p.current:N0}/{p.total:N0}";
+        });
+
         try
         {
+            ProgressText = "Preparing…";
+            ProgressValue = 0;
+            ProgressVisible = true;
+
             await Task.Run(() =>
             {
+                // The UI load skipped the Pattern block for speed; expand it now
+                // (on this background thread) so the vectors are available. Signal
+                // edits made in the UI are preserved because generation uses the
+                // UI's `enabled` list for pins and only the pattern vectors here.
+                if (_parseResult.Pattern.Vectors.Count == 0 && _stilFilePath != null)
+                    _parseResult.Pattern =
+                        _parser.Parse(_stilFilePath, expandPattern: true).Pattern;
+
                 new PinmapGenerator().Generate(
                     System.IO.Path.Combine(dir, baseName + ".pinmap"), enabled);
 
@@ -203,9 +262,10 @@ public class MainViewModel : INotifyPropertyChanged
 
                 new DigiPatGenerator().Generate(
                     System.IO.Path.Combine(dir, baseName + ".digipatsrc"),
-                    _parseResult.Pattern, enabled);
+                    _parseResult.Pattern, enabled, _stilFilePath, progress);
             });
 
+            ProgressVisible = false;
             StatusText = $"Done – files saved to {dir}";
             System.Windows.MessageBox.Show(
                 "Generation complete!", "Success",
@@ -214,6 +274,7 @@ public class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
+            ProgressVisible = false;
             StatusText = $"Generation error: {ex.Message}";
             System.Windows.MessageBox.Show(
                 $"Error during generation:\n{ex.Message}\n{ex.StackTrace}",

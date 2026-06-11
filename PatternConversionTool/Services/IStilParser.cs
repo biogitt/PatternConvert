@@ -4,7 +4,12 @@ namespace PatternConversionTool.Services;
 
 public interface IStilParser
 {
-    StilParseResult Parse(string filePath);
+    /// <summary>Parse a STIL file. When <paramref name="expandPattern"/> is false
+    /// the (potentially huge) Pattern block is skipped so only the lightweight
+    /// configuration — signals, signal groups and timing — is loaded. This keeps
+    /// the UI responsive for large files; the full pattern is expanded later, at
+    /// generation time.</summary>
+    StilParseResult Parse(string filePath, bool expandPattern = true);
 }
 
 public class StilParseResult
