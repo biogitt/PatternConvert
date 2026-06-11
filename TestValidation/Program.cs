@@ -55,6 +55,28 @@ string outDigipat = Path.Combine(outDir, "tpafe5173_pr.digipatsrc");
 new DigiPatGenerator().Generate(outDigipat, result.Pattern, enabled, stilFile);
 Console.WriteLine($"Wrote {outDigipat}  [{sw.Elapsed.TotalSeconds:F1}s]");
 
+// Also generate via the streaming path and confirm it is byte-identical to the
+// in-memory path. Streaming keeps memory flat for huge patterns.
+Console.WriteLine("\n=== Generate digipatsrc (streaming) ===");
+string outStream = Path.Combine(outDir, "tpafe5173_pr.stream.digipatsrc");
+var streamParser = new StilParser { MaxVectors = compareLines + 5_000 };
+new DigiPatGenerator().GenerateStreaming(outStream, result.Pattern, enabled,
+    sink => streamParser.ParseStreaming(stilFile, sink).Pattern.IsComplete, stilFile);
+bool identical = File.ReadAllText(outDigipat) == File.ReadAllText(outStream);
+Console.WriteLine($"Streaming output identical to in-memory: {identical}");
+if (!identical)
+{
+    var a = File.ReadAllLines(outDigipat);
+    var b = File.ReadAllLines(outStream);
+    int max = Math.Max(a.Length, b.Length);
+    for (int i = 0, shown = 0; i < max && shown < 10; i++)
+    {
+        string la = i < a.Length ? a[i] : "<EOF>";
+        string lb = i < b.Length ? b[i] : "<EOF>";
+        if (la != lb) { Console.WriteLine($"  L{i + 1}\n    mem: {la}\n    str: {lb}"); shown++; }
+    }
+}
+
 Console.WriteLine("\n=== Diff (leading lines) ===");
 DiffLeadingLines(refDigipat, outDigipat, compareLines);
 

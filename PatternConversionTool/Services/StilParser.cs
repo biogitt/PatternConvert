@@ -39,23 +39,32 @@ public class StilParser : IStilParser
     /// </summary>
     public int MaxVectors { get; set; }
 
+    /// <summary>
+    /// Optional sink for expanded vector rows. When set, <see cref="ParsePattern"/>
+    /// streams each row to this callback instead of collecting them in
+    /// <see cref="PatternInfo.Vectors"/>, keeping memory flat for huge patterns.
+    /// </summary>
+    private Action<VectorRow>? _rowSink;
+    private int _emittedRows;
+
+    /// <summary>Emit one expanded row: either stream it to the sink or collect it
+    /// in the pattern's vector list when no sink is attached.</summary>
+    private void Emit(PatternInfo pat, VectorRow row)
+    {
+        _emittedRows++;
+        if (_rowSink != null) _rowSink(row);
+        else pat.Vectors.Add(row);
+    }
+
+    /// <summary>Number of rows expanded so far (whether streamed or collected).
+    /// Lets the streaming caller bound the work and report progress.</summary>
+    private int EmittedRows => _emittedRows;
+
     // ?? public entry point ??????????????????????????????????????????
     public StilParseResult Parse(string filePath, bool expandPattern = true)
     {
+        ResetState();
         _lines = File.ReadAllLines(filePath);
-        _pos = 0;
-        _labelOrdinal = 0;
-        _seenLabels.Clear();
-
-        // Reset intermediate state so the parser can be reused safely (e.g. a
-        // fast metadata-only load in the UI followed by a full parse at generate).
-        _signals.Clear();
-        _groups.Clear();
-        _timeSets.Clear();
-        _timeSetOrder.Clear();
-        _procedures.Clear();
-        _macroDefs.Clear();
-        _ioWfcMap.Clear();
 
         while (_pos < _lines.Length)
         {
@@ -69,6 +78,40 @@ public class StilParser : IStilParser
             else _pos++;
         }
         return BuildResult(filePath, expandPattern);
+    }
+
+    /// <summary>Parse a STIL file, streaming each expanded vector row to
+    /// <paramref name="rowSink"/> rather than collecting them. Keeps memory flat
+    /// for patterns with millions of cycles.</summary>
+    public StilParseResult ParseStreaming(string filePath, Action<VectorRow> rowSink)
+    {
+        _rowSink = rowSink;
+        try
+        {
+            return Parse(filePath, expandPattern: true);
+        }
+        finally
+        {
+            _rowSink = null;
+        }
+    }
+
+    private void ResetState()
+    {
+        _pos = 0;
+        _labelOrdinal = 0;
+        _emittedRows = 0;
+        _seenLabels.Clear();
+
+        // Reset intermediate state so the parser can be reused safely (e.g. a
+        // fast metadata-only load in the UI followed by a full parse at generate).
+        _signals.Clear();
+        _groups.Clear();
+        _timeSets.Clear();
+        _timeSetOrder.Clear();
+        _procedures.Clear();
+        _macroDefs.Clear();
+        _ioWfcMap.Clear();
     }
 
     // ?? Signals { � } ??????????????????????????????????????????????
@@ -217,7 +260,8 @@ public class StilParser : IStilParser
     {
         var pattern = new PatternInfo
         {
-            TimeSetOrder = new List<string>(_timeSetOrder)
+            TimeSetOrder = new List<string>(_timeSetOrder),
+            EstimatedCycles = ReadEstimatedCycles()
         };
 
         // try to find Pattern block and expand it
@@ -267,6 +311,20 @@ public class StilParser : IStilParser
     private List<string> Grp(string name) =>
         _groups.TryGetValue(name, out var g) ? g : [];
 
+    /// <summary>Read the approximate cycle count from the STIL footer annotation
+    /// "Patterns reference N V statements, generating M test cycles". Returns 0
+    /// when not present. Scans from the end since the comment is near the bottom.</summary>
+    private long ReadEstimatedCycles()
+    {
+        for (int i = _lines.Length - 1; i >= 0 && i > _lines.Length - 200; i--)
+        {
+            var m = Regex.Match(_lines[i], @"generating\s+(\d+)\s+test\s+cycles");
+            if (m.Success && long.TryParse(m.Groups[1].Value, out var n))
+                return n;
+        }
+        return 0;
+    }
+
     // ?? expand Pattern block into flat VectorRows ??????????????????
     private void ExpandPattern(PatternInfo pat)
     {
@@ -278,7 +336,7 @@ public class StilParser : IStilParser
 
         while (_pos < _lines.Length)
         {
-            if (MaxVectors > 0 && pat.Vectors.Count >= MaxVectors) break;
+            if (MaxVectors > 0 && EmittedRows >= MaxVectors) break;
 
             string line = _lines[_pos].Trim();
             if (line == "}") { pat.IsComplete = true; break; }
@@ -292,7 +350,7 @@ public class StilParser : IStilParser
             var am = Regex.Match(line, @"Ann\s*\{\*\s*(.+?)\s*\*\}");
             if (am.Success)
             {
-                pat.Vectors.Add(new VectorRow { Comment = am.Groups[1].Value });
+                Emit(pat, new VectorRow { Comment = am.Groups[1].Value });
                 _pos++; continue;
             }
 
@@ -333,8 +391,8 @@ public class StilParser : IStilParser
                 // precondition produces 2 identical lines
                 int preOrd = ++_labelOrdinal;
                 string preLabel = DedupLabel(label ?? "precondition all Signals", preOrd);
-                pat.Vectors.Add(MakeRow(cur, curWFT, preLabel));
-                pat.Vectors.Add(MakeRow(cur, null, null));
+                Emit(pat, MakeRow(cur, curWFT, preLabel));
+                Emit(pat, MakeRow(cur, null, null));
                 continue;   // ReadCallBody already advanced _pos
             }
 
@@ -448,7 +506,7 @@ public class StilParser : IStilParser
             _labelOrdinal++;                              // internal proc label(s)
 
         // first vector: pre-shift state
-        pat.Vectors.Add(MakeRow(cur, curWFT, labelStr));
+        Emit(pat, MakeRow(cur, curWFT, labelStr));
 
         // shift vectors
         for (int bit = 0; bit < len; bit++)
@@ -467,7 +525,7 @@ public class StilParser : IStilParser
             foreach (var so in soSigs)
                 if (bit < soData.Length) cur[so] = soData[bit];
 
-            pat.Vectors.Add(MakeRow(cur, null, null));
+            Emit(pat, MakeRow(cur, null, null));
         }
     }
 
@@ -535,7 +593,7 @@ public class StilParser : IStilParser
                 bool iddq = Regex.IsMatch(gap, @"\bIddqTestPoint\b");
 
                 string label = DedupLabel(v.Groups[1].Value, captureBaseOrd);
-                pat.Vectors.Add(new VectorRow
+                Emit(pat, new VectorRow
                 {
                     TimeSet = first ? wft : "-",
                     Values = rowState,
@@ -570,7 +628,7 @@ public class StilParser : IStilParser
                 if (cur.TryGetValue(clk, out var c) && c == 'P')
                     cur[clk] = PulseLevel(clk, wft);
 
-            pat.Vectors.Add(MakeRow(cur, wft, null));
+            Emit(pat, MakeRow(cur, wft, null));
         }
 
         curWFT = wft;

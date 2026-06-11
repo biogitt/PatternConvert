@@ -243,26 +243,44 @@ public class MainViewModel : INotifyPropertyChanged
             ProgressValue = 0;
             ProgressVisible = true;
 
+            var result = _parseResult;   // non-null (guarded above)
+            var stilPath = _stilFilePath;
+
             await Task.Run(() =>
             {
-                // The UI load skipped the Pattern block for speed; expand it now
-                // (on this background thread) so the vectors are available. Signal
-                // edits made in the UI are preserved because generation uses the
-                // UI's `enabled` list for pins and only the pattern vectors here.
-                if (_parseResult.Pattern.Vectors.Count == 0 && _stilFilePath != null)
-                    _parseResult.Pattern =
-                        _parser.Parse(_stilFilePath, expandPattern: true).Pattern;
-
+                // Pinmap and timing only need the lightweight configuration.
                 new PinmapGenerator().Generate(
                     System.IO.Path.Combine(dir, baseName + ".pinmap"), enabled);
 
-                new TimingGenerator(_parseResult.SignalGroups).Generate(
+                new TimingGenerator(result.SignalGroups).Generate(
                     System.IO.Path.Combine(dir, baseName + ".digitiming"),
-                    _parseResult.Timing, enabled);
+                    result.Timing, enabled);
 
-                new DigiPatGenerator().Generate(
-                    System.IO.Path.Combine(dir, baseName + ".digipatsrc"),
-                    _parseResult.Pattern, enabled, _stilFilePath, progress);
+                // The pattern can contain millions of vectors. Stream them
+                // straight to disk so memory stays flat instead of expanding the
+                // whole pattern into a List first. Signal edits made in the UI are
+                // preserved because generation uses the UI's `enabled` list.
+                if (stilPath != null)
+                {
+                    new DigiPatGenerator().GenerateStreaming(
+                        System.IO.Path.Combine(dir, baseName + ".digipatsrc"),
+                        result.Pattern, enabled,
+                        sink =>
+                        {
+                            var streamResult = _parser.ParseStreaming(stilPath, sink);
+                            // Propagate the freshly-read metadata (name / complete).
+                            result.Pattern.IsComplete = streamResult.Pattern.IsComplete;
+                            return streamResult.Pattern.IsComplete;
+                        },
+                        stilPath, progress);
+                }
+                else
+                {
+                    // No source path (e.g. already-expanded pattern): write directly.
+                    new DigiPatGenerator().Generate(
+                        System.IO.Path.Combine(dir, baseName + ".digipatsrc"),
+                        result.Pattern, enabled, null, progress);
+                }
             });
 
             ProgressVisible = false;

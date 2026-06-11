@@ -17,6 +17,12 @@ public class PatternInfo
     /// (as opposed to being truncated by a vector cap). The generator only emits
     /// the end-of-pattern <c>halt</c> marker when the pattern is complete.</summary>
     public bool IsComplete { get; set; }
+
+    /// <summary>Approximate number of test cycles, read cheaply from the STIL
+    /// footer ("generating N test cycles"). Used as a progress-bar denominator
+    /// when streaming the pattern, since the exact total is not known up front.
+    /// Zero when the file carries no such annotation.</summary>
+    public long EstimatedCycles { get; set; }
 }
 
 /// <summary>
