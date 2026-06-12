@@ -14,7 +14,11 @@ public class MainViewModel : INotifyPropertyChanged
 
     private StilParseResult? _parseResult;
     private string? _stilFilePath;
-    private string _statusText = "Ready.";
+
+    // Running-status log. New entries are appended (not overwritten) so the
+    // panel keeps the full history rather than just the latest message.
+    private readonly System.Text.StringBuilder _statusLog = new();
+    private string _statusLogText = "";
 
     private bool _progressVisible;
     private double _progressValue;
@@ -23,10 +27,36 @@ public class MainViewModel : INotifyPropertyChanged
 
     public ObservableCollection<Signal> Signals { get; } = new();
 
+    /// <summary>
+    /// Running-status history shown in the status panel. Bound read-only to the
+    /// UI; entries are added through <see cref="AppendStatus"/>.
+    /// </summary>
+    public string StatusLog
+    {
+        get => _statusLogText;
+        private set { _statusLogText = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>
+    /// Sets the latest status message. Retained for call-site compatibility;
+    /// each assignment is appended to <see cref="StatusLog"/> as a new entry
+    /// instead of overwriting the previous one.
+    /// </summary>
     public string StatusText
     {
-        get => _statusText;
-        set { _statusText = value; OnPropertyChanged(); }
+        set => AppendStatus(value);
+    }
+
+    /// <summary>
+    /// Appends a timestamped line to the running-status log. New messages are
+    /// added to the history and the UI scrolls to the latest entry.
+    /// </summary>
+    public void AppendStatus(string message)
+    {
+        if (_statusLog.Length > 0)
+            _statusLog.AppendLine();
+        _statusLog.Append($"[{DateTime.Now:HH:mm:ss}] {message}");
+        StatusLog = _statusLog.ToString();
     }
 
     /// <summary>Whether the progress indicator is shown (only during generation).</summary>
@@ -76,6 +106,8 @@ public class MainViewModel : INotifyPropertyChanged
         ExportCsvCommand = new RelayCommand(DoExportCsv, _ => Signals.Count > 0);
         GenerateCommand  = new RelayCommand(DoGenerate,
             _ => Signals.Count > 0 && _parseResult != null);
+
+        AppendStatus("Ready.");
     }
 
     // ?? Load STIL ??????????????????????????????????????????????????
@@ -131,9 +163,9 @@ public class MainViewModel : INotifyPropertyChanged
 
             if (Signals.Count > 0)
             {
-                // A STIL file is already loaded: use the 000/SIG file to filter
-                // and rename the existing signals. The "Remove?" column decides
-                // which signals are kept (Enabled) for conversion.
+                // A STIL file is already loaded: use the imported signal file to
+                // filter and rename the existing signals. The kept signals are
+                // those marked Enabled (000/SIG "Remove?"=false, or native Enabled).
                 var current = Signals.ToList();
                 _csvService.ApplyMapping(current, mapping);
 
@@ -150,8 +182,8 @@ public class MainViewModel : INotifyPropertyChanged
             }
             else
             {
-                // No STIL loaded yet: load the mapping rows directly, keeping only
-                // the signals flagged for conversion (Remove? == false).
+                // No STIL loaded yet: load the mapping rows directly; their
+                // Enabled flag marks which signals are kept for conversion.
                 Signals.Clear();
                 foreach (var s in mapping)
                     Signals.Add(s);
@@ -175,9 +207,9 @@ public class MainViewModel : INotifyPropertyChanged
     {
         var dlg = new Microsoft.Win32.SaveFileDialog
         {
-            Filter = "Signal files (*.sig)|*.sig|CSV (*.csv)|*.csv|All Files (*.*)|*.*",
+            Filter = "CSV (*.csv)|*.csv|All Files (*.*)|*.*",
             Title = "Export Signal Configuration",
-            FileName = "000"
+            FileName = "signals"
         };
         if (dlg.ShowDialog() != true) return;
 

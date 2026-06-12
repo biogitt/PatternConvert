@@ -8,7 +8,6 @@ public class Signal : INotifyPropertyChanged
     private string _name = "";
     private string _direction = "";
     private bool _enabled = true;
-    private bool _remote;
     private string _group = "";
     private string _source = "";
     private string _originalStilName = "";
@@ -33,13 +32,6 @@ public class Signal : INotifyPropertyChanged
     {
         get => _enabled;
         set { _enabled = value; OnPropertyChanged(); }
-    }
-
-    /// <summary>Whether this signal is flagged as "remote" (Remove in 000 file).</summary>
-    public bool Remote
-    {
-        get => _remote;
-        set { _remote = value; OnPropertyChanged(); }
     }
 
     /// <summary>User-defined grouping label.</summary>
