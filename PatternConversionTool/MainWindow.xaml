@@ -18,9 +18,14 @@
 
     <Grid Margin="10">
         <Grid.RowDefinitions>
+            <!-- Toolbar -->
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <!-- Signal display area (~60% of the available vertical space) -->
+            <RowDefinition Height="3*"/>
+            <!-- Program running status area (~40%) -->
+            <RowDefinition Height="2*"/>
+            <!-- Conversion progress area (fixed small height) -->
+            <RowDefinition Height="40"/>
         </Grid.RowDefinitions>
 
         <!-- Toolbar -->
@@ -44,8 +49,6 @@
                     Binding="{Binding Direction}" IsReadOnly="True"/>
                 <DataGridCheckBoxColumn Header="Enabled" Width="65"
                     Binding="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}"/>
-                <DataGridCheckBoxColumn Header="Remote" Width="65"
-                    Binding="{Binding Remote, UpdateSourceTrigger=PropertyChanged}"/>
                 <DataGridTextColumn Header="Group" Width="100"
                     Binding="{Binding Group, UpdateSourceTrigger=PropertyChanged}"/>
                 <DataGridTextColumn Header="Source" Width="70"
@@ -55,28 +58,40 @@
             </DataGrid.Columns>
         </DataGrid>
 
-        <!-- Status bar -->
-        <Grid Grid.Row="2" Margin="0,6,0,0">
+        <!-- Program running status area: scrollable, log-style history -->
+        <GroupBox Grid.Row="2" Header="Program Running Status" Margin="0,6,0,0">
+            <TextBox x:Name="StatusLogBox"
+                     Text="{Binding StatusLog, Mode=OneWay}"
+                     IsReadOnly="True"
+                     IsReadOnlyCaretVisible="False"
+                     TextWrapping="Wrap"
+                     FontFamily="Consolas"
+                     Background="#FFFAFAFA"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     TextChanged="StatusLogBox_TextChanged"/>
+        </GroupBox>
+
+        <!-- Conversion progress area (bottom, fixed small height) -->
+        <Grid Grid.Row="3" Margin="0,6,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <TextBlock Grid.Column="0" Text="{Binding StatusText}"
-                       TextWrapping="Wrap" VerticalAlignment="Center"/>
+            <!-- Generation progress bar with "line xxx/xxxx" label -->
+            <ProgressBar Grid.Column="0" Height="18" VerticalAlignment="Center"
+                         Minimum="0"
+                         Maximum="{Binding ProgressMaximum}"
+                         Value="{Binding ProgressValue}"
+                         Visibility="{Binding ProgressVisible,
+                             Converter={StaticResource BoolToVisibility}}"/>
 
-            <!-- Generation progress: "line xxx/xxxx" with a bar -->
-            <StackPanel Grid.Column="1" Orientation="Horizontal"
-                        VerticalAlignment="Center"
-                        Visibility="{Binding ProgressVisible,
-                            Converter={StaticResource BoolToVisibility}}">
-                <TextBlock Text="{Binding ProgressText}" VerticalAlignment="Center"
-                           Margin="0,0,8,0" MinWidth="140" TextAlignment="Right"/>
-                <ProgressBar Width="220" Height="16"
-                             Minimum="0"
-                             Maximum="{Binding ProgressMaximum}"
-                             Value="{Binding ProgressValue}"/>
-            </StackPanel>
+            <TextBlock Grid.Column="1" Text="{Binding ProgressText}"
+                       VerticalAlignment="Center"
+                       Margin="8,0,0,0" MinWidth="140" TextAlignment="Right"
+                       Visibility="{Binding ProgressVisible,
+                           Converter={StaticResource BoolToVisibility}}"/>
         </Grid>
     </Grid>
 </Window>

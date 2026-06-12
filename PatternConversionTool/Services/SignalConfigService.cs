@@ -4,15 +4,100 @@ using PatternConversionTool.Models;
 namespace PatternConversionTool.Services;
 
 /// <summary>
-/// Import / export signal configuration in the "000" / "SIG" CSV format
-/// used by VectorPort.
+/// Import / export signal configuration.
+/// <para>Two CSV layouts are supported on import and auto-detected:</para>
+/// <list type="bullet">
+///   <item>The tool's own native layout: a simple header row mirroring the
+///   signal panel (Name, Direction, Enabled, Group, Source, STILName).</item>
+///   <item>The "000" / "SIG" layout produced by VectorPort.</item>
+/// </list>
+/// Export always writes the native layout.
 /// </summary>
 public class SignalConfigService : ISignalConfigService
 {
     public List<Signal> ImportCsv(string filePath)
     {
+        var lines = File.ReadAllLines(filePath);
+        return IsNativeFormat(lines)
+            ? ImportNativeCsv(lines)
+            : ImportVectorPortCsv(lines);
+    }
+
+    /// <summary>
+    /// Detects the tool's own (native) CSV by its header row, whose first
+    /// column is "Name". VectorPort "000"/"SIG" data rows start with a numeric
+    /// order column, so this never misfires for that format.
+    /// </summary>
+    private static bool IsNativeFormat(IEnumerable<string> lines)
+    {
+        foreach (var line in lines)
+        {
+            if (line.StartsWith('#') || string.IsNullOrWhiteSpace(line))
+                continue;
+
+            var fields = line.Split(',');
+            return fields.Length > 0 &&
+                   fields[0].Trim().Equals("Name", StringComparison.OrdinalIgnoreCase);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Reads the tool's own CSV layout. Columns are resolved by header name so
+    /// their order is not significant.
+    /// </summary>
+    private static List<Signal> ImportNativeCsv(string[] lines)
+    {
         var result = new List<Signal>();
-        foreach (var line in File.ReadAllLines(filePath))
+        string[]? header = null;
+
+        foreach (var line in lines)
+        {
+            if (line.StartsWith('#') || string.IsNullOrWhiteSpace(line))
+                continue;
+
+            var p = line.Split(',');
+            if (header == null)
+            {
+                // First non-comment line is the column header.
+                header = Array.ConvertAll(p, h => h.Trim());
+                continue;
+            }
+
+            string Field(string column)
+            {
+                int idx = Array.FindIndex(header,
+                    h => h.Equals(column, StringComparison.OrdinalIgnoreCase));
+                return idx >= 0 && idx < p.Length ? p[idx].Trim() : "";
+            }
+
+            string name = Field("Name");
+            if (string.IsNullOrEmpty(name)) continue;
+
+            // Default to enabled when the column is missing or unparseable.
+            bool enabled = !bool.TryParse(Field("Enabled"), out var en) || en;
+            string stil = Field("STILName");
+
+            result.Add(new Signal
+            {
+                Name = name,
+                Direction = Field("Direction"),
+                Enabled = enabled,
+                Group = Field("Group"),
+                Source = "CSV",
+                OriginalStilName = string.IsNullOrEmpty(stil) ? name : stil
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Reads the VectorPort "000" / "SIG" CSV layout.
+    /// </summary>
+    private static List<Signal> ImportVectorPortCsv(string[] lines)
+    {
+        var result = new List<Signal>();
+        foreach (var line in lines)
         {
             if (line.StartsWith('#') || string.IsNullOrWhiteSpace(line))
                 continue;
@@ -44,7 +129,6 @@ public class SignalConfigService : ISignalConfigService
                 Name = p[1],            // Group/Alias Name (becomes the DUT pin name)
                 Direction = direction,
                 Enabled = !remove,      // Remove? == false -> keep
-                Remote = remove,
                 Group = isScan ? "Scan" : "",
                 Source = "CSV",
                 // Reconstruct the exact STIL signal name from the original name
@@ -81,7 +165,6 @@ public class SignalConfigService : ISignalConfigService
                 // Keep / rename according to the mapping.
                 sig.Name = map.Name;
                 sig.Enabled = map.Enabled;   // driven by Remove? == false
-                sig.Remote = map.Remote;
                 sig.Group = map.Group;
                 sig.MappingOrder = order[sig.OriginalStilName];
             }
@@ -107,31 +190,24 @@ public class SignalConfigService : ISignalConfigService
             : $"{originalName}[{busIndex}]";
     }
 
+    /// <summary>
+    /// Writes the tool's own native CSV layout, mirroring the columns of the
+    /// signal panel. This file can be re-imported via <see cref="ImportCsv"/>.
+    /// </summary>
     public void ExportCsv(string filePath, IEnumerable<Signal> signals)
     {
         using var w = new StreamWriter(filePath);
-        w.WriteLine("# PatternConversionTool");
+        w.WriteLine("# PatternConversionTool signal configuration");
         w.WriteLine($"# File saved on {DateTime.Now:MMMM d, yyyy} at {DateTime.Now:hh:mm:ss tt}");
-        w.WriteLine("# Order, Group/Alias Name, Signal Name, Bus Index, Direction, Radix, " +
-                    "Is Static?, Static Value, Remove?, Is Scan?, Original Group Name, " +
-                    "Original Signal Name (without bus index values), Force Timing Mode?, " +
-                    "Remove Differential Pin?, Map Signal to addition HSVG Columns, ReMap State?, ReMap State Value");
+        w.WriteLine("Name,Direction,Enabled,Group,Source,STILName");
 
-        int order = 0;
         foreach (var sig in signals)
         {
-            string dir = sig.Direction switch
-            {
-                "In" => "Input",
-                "Out" => "Output",
-                "InOut" => "Bidir",
-                _ => sig.Direction
-            };
-            bool isScan = sig.Group == "Scan";
-            string origStil = string.IsNullOrEmpty(sig.OriginalStilName) ? sig.Name : sig.OriginalStilName;
-
-            w.WriteLine($"{order},{sig.Name},{sig.Name},,{dir},Binary,false,,{(!sig.Enabled).ToString().ToLower()},{isScan.ToString().ToLower()},{sig.Name},{origStil},false,false,,false,");
-            order++;
+            string stil = string.IsNullOrEmpty(sig.OriginalStilName)
+                ? sig.Name : sig.OriginalStilName;
+            w.WriteLine($"{sig.Name},{sig.Direction}," +
+                        $"{sig.Enabled.ToString().ToLowerInvariant()}," +
+                        $"{sig.Group},{sig.Source},{stil}");
         }
     }
 }
