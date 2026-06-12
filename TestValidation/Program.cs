@@ -5,8 +5,10 @@ using PatternConversionTool.Models;
 // .digipatsrc against the reference (standard) conversion.
 //
 // The reference pattern can be enormous (millions of lines), so only the
-// leading portion is compared. Defaults to the tpc6241 "pr" example.
-string exDir   = @"C:\Users\kaguo\Desktop\PatternConvert\Examples\2023102\tpc6241";
+// leading portion is compared. Defaults to the tpc6241 "pr" example, resolved
+// relative to the repository so no machine-specific path is hard-coded. Pass
+// explicit paths as command-line arguments to override these defaults.
+string exDir   = Path.Combine("Examples", "2023102", "tpc6241");
 string stilFile = args.Length > 0 ? args[0] : Path.Combine(exDir, "tpafe5173_pr.stil");
 string sigFile  = args.Length > 1 ? args[1] : Path.Combine(exDir, "000.csv");
 string refDigipat = args.Length > 2
