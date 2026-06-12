@@ -12,7 +12,7 @@ the file formats consumed by the **NI Semiconductor Test Module (STS)**:
 | `.pinmap`        | XML    | Pin map (instruments, DUT pins, pin groups)          |
 | `.digitiming`    | XML    | Digital timing (time sets, periods, pin edges)       |
 
-The tool also supports the **`000` / `SIG` CSV** signal-configuration format used by
+The tool also supports the **CSV** signal-configuration format used by
 VectorPort, so you can filter, rename and re-order the signals that end up in the
 generated files.
 
@@ -28,7 +28,7 @@ generated files.
 - **Streaming generation** — the expanded vectors are streamed straight to disk, so
   memory stays flat even for patterns with millions of cycles.
 - **Progress reporting** during generation (`line N/total`).
-- **Validation harness** (`TestValidation`) that diffs a freshly generated
+- **Validation harness(deleted)** (`TestValidation`) that diffs a freshly generated
   `.digipatsrc` against a reference conversion.
 
 ## Projects
@@ -36,7 +36,6 @@ generated files.
 | Project                | Type                 | Description                                                       |
 | ---------------------- | -------------------- | ----------------------------------------------------------------- |
 | `PatternConversionTool`| WPF app (.NET 10)    | The conversion GUI (MVVM).                                         |
-| `TestValidation`       | Console app (.NET 10)| Converts a sample and diffs the result against a reference file.  |
 
 ### Solution layout
 
@@ -48,8 +47,6 @@ PatternConversionTool/
                  PinmapGenerator, TimingGenerator
   ViewModels/    MainViewModel, RelayCommand
   MainWindow.xaml / App.xaml
-TestValidation/
-  Program.cs     Parse ? map ? generate ? diff against a reference .digipatsrc
 ```
 
 ## Requirements
@@ -90,17 +87,6 @@ dotnet run --project PatternConversionTool
 ## Signal mapping 
 
 Lines beginning with `#` are treated as comments.
-
-## Validating a conversion
-
-All arguments are optional and fall back to built-in example paths:
-
-| Arg | Meaning                                   | Default                       |
-| --- | ----------------------------------------- | ----------------------------- |
-| 1   | STIL input file                           | example `tpafe5173_pr.stil`   |
-| 2   | `000` / `SIG` mapping CSV                 | example `000.csv`             |
-| 3   | Reference `.digipatsrc` to diff against   | example reference output      |
-| 4   | Number of leading reference lines to diff | `400000`                      |
 
 ## License
 
