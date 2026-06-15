@@ -11,6 +11,8 @@ the file formats consumed by the **NI Semiconductor Test Module (STS)**:
 | `.digipatsrc`    | text   | Digital pattern source (expanded test vectors)       |
 | `.pinmap`        | XML    | Pin map (instruments, DUT pins, pin groups)          |
 | `.digitiming`    | XML    | Digital timing (time sets, periods, pin edges)       |
+| `.digipat`       | binary | Compiled pattern (when the NI compiler is installed)  |
+
 
 The tool also supports the **CSV** signal-configuration format used by
 VectorPort, so you can filter, rename and re-order the signals that end up in the
@@ -44,7 +46,7 @@ PatternConvert.slnx
 PatternConversionTool/
   Models/        Signal, PatternInfo (VectorRow), SignalGroup, TimingInfo
   Services/      StilParser, SignalConfigService, DigiPatGenerator,
-                 PinmapGenerator, TimingGenerator
+                 PinmapGenerator, TimingGenerator, DigitalPatternCompiler
   ViewModels/    MainViewModel, RelayCommand
   MainWindow.xaml / App.xaml
 ```
@@ -86,7 +88,6 @@ dotnet run --project PatternConversionTool
 
 ## Signal mapping 
 
-Lines beginning with `#` are treated as comments.
 
 ## License
 

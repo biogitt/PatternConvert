@@ -23,6 +23,11 @@ public class PatternInfo
     /// when streaming the pattern, since the exact total is not known up front.
     /// Zero when the file carries no such annotation.</summary>
     public long EstimatedCycles { get; set; }
+
+    /// <summary>Unrecognized STIL commands found while expanding the Pattern
+    /// block, captured as (1-based source line, command token). Lets the caller
+    /// report <c>unknown command "XXX" at line N</c> for each one after a parse.</summary>
+    public List<(int Line, string Command)> UnknownCommands { get; set; } = new();
 }
 
 /// <summary>
@@ -46,4 +51,13 @@ public class VectorRow
     /// The generator emits a <c>// IddqTestPoint at cycle N</c> comment before the
     /// row's label, where N is the running count of vectors emitted so far.</summary>
     public bool IddqTestPoint { get; set; }
+
+    /// <summary>When set, this row carries no vector data but marks an
+    /// unrecognized STIL command from the source. The generator writes a
+    /// conspicuous warning line into the output pattern in its place.</summary>
+    public string? UnknownCommand { get; set; }
+
+    /// <summary>1-based source line of <see cref="UnknownCommand"/>, shown in the
+    /// conspicuous output marker.</summary>
+    public int UnknownCommandLine { get; set; }
 }

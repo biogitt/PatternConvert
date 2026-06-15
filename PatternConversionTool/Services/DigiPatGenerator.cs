@@ -48,7 +48,9 @@ public class DigiPatGenerator
         for (int i = pattern.Vectors.Count - 1; i >= 0; i--)
         {
             var rw = pattern.Vectors[i];
-            if (!(rw.Comment != null && rw.Values.Count == 0)) { lastDataIndex = i; break; }
+            bool isComment = rw.Comment != null && rw.Values.Count == 0;
+            bool isMarker = rw.UnknownCommand != null;
+            if (!isComment && !isMarker) { lastDataIndex = i; break; }
         }
         // Only mark the terminal vector when the whole pattern was expanded; a
         // capped / truncated parse must not emit a premature halt.
@@ -113,7 +115,8 @@ public class DigiPatGenerator
         bool complete = parse(row =>
         {
             bool isComment = row.Comment != null && row.Values.Count == 0;
-            if (isComment)
+            bool isMarker = row.UnknownCommand != null;
+            if (isComment || isMarker)
             {
                 // Flush any held data row first to preserve order.
                 if (pendingData != null) { WriteRow(w, pendingData, enabledSignals, state, false); pendingData = null; }
@@ -153,6 +156,17 @@ public class DigiPatGenerator
     private void WriteRow(StreamWriter w, VectorRow row,
         IReadOnlyList<Signal> enabledSignals, WriteState state, bool isLast)
     {
+        // Unrecognized source command: write a conspicuous mark in its place so
+        // the unsupported construct is obvious in the generated pattern.
+        if (row.UnknownCommand != null)
+        {
+            string bar = "// " + new string('!', 85);
+            w.WriteLine(bar);
+            w.WriteLine($"// !!! UNKNOWN COMMAND \"{row.UnknownCommand}\" at line {row.UnknownCommandLine} -- review source !!!");
+            w.WriteLine(bar);
+            return;
+        }
+
         // comment-only row
         if (row.Comment != null && row.Values.Count == 0)
         {
