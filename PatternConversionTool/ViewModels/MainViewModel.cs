@@ -260,6 +260,9 @@ public class MainViewModel : INotifyPropertyChanged
                 ? "output"
                 : _parseResult.Pattern.PatternName);
 
+        string pinmapPath = System.IO.Path.Combine(dir, baseName + ".pinmap");
+        string digipatSrcPath = System.IO.Path.Combine(dir, baseName + ".digipatsrc");
+
         // Created on the UI thread, so Report callbacks marshal back to it and can
         // safely update the bound progress properties.
         var progress = new Progress<(int current, int total)>(p =>
@@ -281,8 +284,7 @@ public class MainViewModel : INotifyPropertyChanged
             await Task.Run(() =>
             {
                 // Pinmap and timing only need the lightweight configuration.
-                new PinmapGenerator().Generate(
-                    System.IO.Path.Combine(dir, baseName + ".pinmap"), enabled);
+                new PinmapGenerator().Generate(pinmapPath, enabled);
 
                 new TimingGenerator(result.SignalGroups).Generate(
                     System.IO.Path.Combine(dir, baseName + ".digitiming"),
@@ -295,13 +297,15 @@ public class MainViewModel : INotifyPropertyChanged
                 if (stilPath != null)
                 {
                     new DigiPatGenerator().GenerateStreaming(
-                        System.IO.Path.Combine(dir, baseName + ".digipatsrc"),
+                        digipatSrcPath,
                         result.Pattern, enabled,
                         sink =>
                         {
                             var streamResult = _parser.ParseStreaming(stilPath, sink);
-                            // Propagate the freshly-read metadata (name / complete).
+                            // Propagate the freshly-read metadata (name / complete)
+                            // and any unrecognized commands found while expanding.
                             result.Pattern.IsComplete = streamResult.Pattern.IsComplete;
+                            result.Pattern.UnknownCommands = streamResult.Pattern.UnknownCommands;
                             return streamResult.Pattern.IsComplete;
                         },
                         stilPath, progress);
@@ -310,13 +314,29 @@ public class MainViewModel : INotifyPropertyChanged
                 {
                     // No source path (e.g. already-expanded pattern): write directly.
                     new DigiPatGenerator().Generate(
-                        System.IO.Path.Combine(dir, baseName + ".digipatsrc"),
+                        digipatSrcPath,
                         result.Pattern, enabled, null, progress);
                 }
             });
 
             ProgressVisible = false;
             StatusText = $"Done – files saved to {dir}";
+
+            // Report any unrecognized STIL commands encountered during expansion.
+            // Each was also marked conspicuously in the generated .digipatsrc.
+            var unknown = result.Pattern.UnknownCommands;
+            if (unknown.Count > 0)
+            {
+                foreach (var (lineNo, command) in unknown)
+                    StatusText = $"unknown command \"{command}\" at line {lineNo}";
+                StatusText = $"Warning: {unknown.Count} unknown command(s) marked in {baseName}.digipatsrc.";
+            }
+
+            // If the NI Digital Pattern Compiler is installed, compile the freshly
+            // generated text pattern into the binary .digipat format. The step is
+            // skipped silently (with a status note) when the compiler is absent.
+            await CompileIfAvailable(digipatSrcPath, pinmapPath);
+
             System.Windows.MessageBox.Show(
                 "Generation complete!", "Success",
                 System.Windows.MessageBoxButton.OK,
@@ -330,6 +350,46 @@ public class MainViewModel : INotifyPropertyChanged
                 $"Error during generation:\n{ex.Message}\n{ex.StackTrace}",
                 "Error", System.Windows.MessageBoxButton.OK,
                 System.Windows.MessageBoxImage.Error);
+        }
+    }
+
+    // ?? Compile (optional, NI Digital Pattern Compiler) ?????????????
+    /// <summary>
+    /// Compiles the generated text pattern (<paramref name="digipatSrcPath"/>)
+    /// into the NI binary <c>.digipat</c> format using the supplied pin map, but
+    /// only when the NI Digital Pattern Compiler is installed on this machine.
+    /// When the compiler is absent the step is skipped and a note is appended to
+    /// the status log.
+    /// </summary>
+    private async Task CompileIfAvailable(string digipatSrcPath, string pinmapPath)
+    {
+        var compiler = new DigitalPatternCompiler();
+        if (!compiler.IsAvailable)
+        {
+            StatusText = "Digital Pattern Compiler not found – skipped compile step.";
+            return;
+        }
+
+        try
+        {
+            StatusText = "Compiling pattern with NI Digital Pattern Compiler…";
+            var result = await Task.Run(() => compiler.Compile(digipatSrcPath, pinmapPath));
+
+            if (result.Success)
+            {
+                StatusText = "Compile complete – binary .digipat generated.";
+            }
+            else
+            {
+                string detail = string.IsNullOrWhiteSpace(result.StandardError)
+                    ? result.StandardOutput
+                    : result.StandardError;
+                StatusText = $"Compile failed (exit code {result.ExitCode}). {detail}".Trim();
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Compile error: {ex.Message}";
         }
     }
 

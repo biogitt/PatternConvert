@@ -419,7 +419,57 @@ public class StilParser : IStilParser
                 continue;   // ReadCallBody already advanced _pos
             }
 
+            // Any remaining statement that carries a leading keyword is a command
+            // this tool does not recognize. Record it (with its 1-based source
+            // line) and emit a marker row so the generated pattern carries a
+            // conspicuous mark; the caller logs "unknown command \"XXX\" at line ##".
+            // Blank lines and bare braces are structural and skipped silently.
+            if (line.Length > 0)
+            {
+                string stmt = line;
+                var lbl = Regex.Match(stmt, @"^""[^""]+""\s*:\s*");
+                if (lbl.Success) stmt = stmt[lbl.Length..];
+
+                var cmd = Regex.Match(stmt, @"^([A-Za-z_]\w*)");
+                if (cmd.Success)
+                {
+                    int lineNo = _pos + 1;
+                    string command = cmd.Groups[1].Value;
+                    pat.UnknownCommands.Add((lineNo, command));
+                    Emit(pat, new VectorRow
+                    {
+                        UnknownCommand = command,
+                        UnknownCommandLine = lineNo
+                    });
+                    SkipUnknownStatement();
+                    continue;
+                }
+            }
+
             _pos++;
+        }
+    }
+
+    /// <summary>Advance <see cref="_pos"/> past an unrecognized statement so its
+    /// continuation lines are not re-flagged as further unknown commands. A brace
+    /// block is consumed up to its matching close; otherwise lines are consumed up
+    /// to the <c>;</c> terminator (falling back to a single line).</summary>
+    private void SkipUnknownStatement()
+    {
+        int depth = 0;
+        bool sawBrace = false;
+        while (_pos < _lines.Length)
+        {
+            string l = _lines[_pos];
+            foreach (char c in l)
+            {
+                if (c == '{') { depth++; sawBrace = true; }
+                else if (c == '}') depth--;
+            }
+            _pos++;
+            if (sawBrace) { if (depth <= 0) break; }   // brace block fully consumed
+            else if (l.Contains(';')) break;           // statement terminator
+            else break;                                // bare single line
         }
     }
 

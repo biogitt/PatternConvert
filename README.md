@@ -11,16 +11,15 @@ the file formats consumed by the **NI Semiconductor Test Module (STS)**:
 | `.digipatsrc`    | text   | Digital pattern source (expanded test vectors)       |
 | `.pinmap`        | XML    | Pin map (instruments, DUT pins, pin groups)          |
 | `.digitiming`    | XML    | Digital timing (time sets, periods, pin edges)       |
+| `.digipat`       | binary | Compiled pattern (when the NI compiler is installed)  |
 
-The tool also supports the **`000` / `SIG` CSV** signal-configuration format used by
-VectorPort, so you can filter, rename and re-order the signals that end up in the
-generated files.
+
 
 ## Features
 
 - **STIL parsing** for the ATPG subset emitted by TetraMAX / DFT Compiler — signals,
   signal groups, timing (`WaveformTable`), procedures, macros and the pattern block.
-- **Signal mapping** via the `000` / `SIG` CSV format: keep/remove signals, rename them
+- **Signal mapping** via the CSV format: keep/remove signals, rename them
   to DUT pin names, and preserve the mapping file's ordering in the output.
 - **Lazy pattern expansion** — opening a STIL file only parses the lightweight
   configuration (signals/groups/timing) so the UI stays responsive; the (potentially
@@ -28,6 +27,9 @@ generated files.
 - **Streaming generation** — the expanded vectors are streamed straight to disk, so
   memory stays flat even for patterns with millions of cycles.
 - **Progress reporting** during generation (`line N/total`).
+- **Optional compile** — when the **NI Digital Pattern Compiler** is installed, the
+  generated `.digipatsrc` is compiled to the binary `.digipat` format automatically
+  after conversion; the step is skipped when the compiler is not present.
 - **Validation harness** (`TestValidation`) that diffs a freshly generated
   `.digipatsrc` against a reference conversion.
 
@@ -45,7 +47,7 @@ PatternConvert.slnx
 PatternConversionTool/
   Models/        Signal, PatternInfo (VectorRow), SignalGroup, TimingInfo
   Services/      StilParser, SignalConfigService, DigiPatGenerator,
-                 PinmapGenerator, TimingGenerator
+                 PinmapGenerator, TimingGenerator, DigitalPatternCompiler
   ViewModels/    MainViewModel, RelayCommand
   MainWindow.xaml / App.xaml
 TestValidation/
@@ -76,52 +78,24 @@ dotnet run --project PatternConversionTool
 1. **Load STIL** — opens a STIL file and lists its signals (direction, STIL name).
    Only the configuration is parsed at this point; the pattern is expanded on
    generation.
-2. **Load CSV** — (optional) import a `000` / `SIG` mapping file to filter and rename
+2. **Load CSV** — (optional) import a CSV mapping file to filter and rename
    signals. Signals flagged `Remove? == true` are excluded; kept signals are listed
    first, in mapping-file order.
 3. **Edit signals** — adjust pin name, enabled/remote flags and grouping directly in the
    grid.
 4. **Export CSV** — (optional) save the current signal configuration back to a
-   `000` / `SIG` file.
+   CSV file.
 5. **Generate** — choose an output folder. The tool writes `<name>.digipatsrc`,
    `<name>.pinmap` and `<name>.digitiming`, streaming the pattern vectors to disk with a
-   progress indicator.
+   progress indicator. If the **NI Digital Pattern Compiler** is installed, the
+   `.digipatsrc` is then compiled to a binary `<name>.digipat`; otherwise the compile
+   step is skipped.
 
-## Signal mapping (`000` / `SIG` CSV)
 
-The CSV columns are:
-
-```
-Order, Group/Alias Name, Signal Name, Bus Index, Direction, Radix,
-Is Static?, Static Value, Remove?, Is Scan?, Original Group Name,
-Original Signal Name (without bus index values)
-```
-
-- **`Remove? == false`** ? signal is **kept** and converted.
-- **`Group/Alias Name`** ? becomes the DUT **pin name** in the output.
-- **`Original Signal Name` + `Bus Index`** ? reconstruct the exact STIL signal name
-  (e.g. `AVDD_PGA` + `7` ? `AVDD_PGA[7]`) used to map vector columns.
-
-Lines beginning with `#` are treated as comments.
 
 ## Validating a conversion
 
-`TestValidation` converts a sample STIL file (with a `000` mapping) and diffs the leading
-portion of the generated `.digipatsrc` against a reference conversion. It also confirms
-that the in-memory and streaming generation paths produce byte-identical output.
 
-```powershell
-dotnet run --project TestValidation -- <stilFile> <sigFile> <referenceDigipat> [compareLines]
-```
-
-All arguments are optional and fall back to built-in example paths:
-
-| Arg | Meaning                                   | Default                       |
-| --- | ----------------------------------------- | ----------------------------- |
-| 1   | STIL input file                           | example `tpafe5173_pr.stil`   |
-| 2   | `000` / `SIG` mapping CSV                 | example `000.csv`             |
-| 3   | Reference `.digipatsrc` to diff against   | example reference output      |
-| 4   | Number of leading reference lines to diff | `400000`                      |
 
 ## License
 
