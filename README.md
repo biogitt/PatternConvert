@@ -73,13 +73,13 @@ dotnet run --project PatternConversionTool
 1. **Load STIL** — opens a STIL file and lists its signals (direction, STIL name).
    Only the configuration is parsed at this point; the pattern is expanded on
    generation.
-2. **Load CSV** — (optional) import a `000` / `SIG` mapping file to filter and rename
+2. **Load CSV** — (optional) import a CSV mapping file to filter and rename
    signals. Signals flagged `Remove? == true` are excluded; kept signals are listed
    first, in mapping-file order.
 3. **Edit signals** — adjust pin name, enabled/remote flags and grouping directly in the
    grid.
 4. **Export CSV** — (optional) save the current signal configuration back to a
-   `000` / `SIG` file.
+   CSV file.
 5. **Generate** — choose an output folder. The tool writes `<name>.digipatsrc`,
    `<name>.pinmap` and `<name>.digitiming`, streaming the pattern vectors to disk with a
    progress indicator.
