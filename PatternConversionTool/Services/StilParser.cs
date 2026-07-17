@@ -740,6 +740,19 @@ public class StilParser : IStilParser
         {
             string l = lines[i].Trim();
 
+            // Inline form on a single line: "signal"=DATA;  (the scan string can
+            // be thousands of characters long but still fits one line). Capture it
+            // directly so it is not mistaken for the "data follows" form below.
+            var inline = Regex.Match(l, @"^""([^""]+)""\s*=\s*([01UDZHLTXPN]+)\s*;");
+            if (inline.Success)
+            {
+                if (curSig != null && data != null)
+                    result[curSig] = data.ToString();
+                curSig = null; data = null;
+                result[inline.Groups[1].Value] = inline.Groups[2].Value;
+                continue;
+            }
+
             // "signal"= at end of line (data follows)
             var sa = Regex.Match(l, @"""([^""]+)""\s*=\s*$");
             if (sa.Success)
