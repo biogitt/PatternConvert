@@ -83,7 +83,13 @@ public class TimingGenerator
         w.WriteStartElement("PinEdge");
         w.WriteAttributeString("pin", pinName);
 
-        var pulse = wfs.FirstOrDefault(f => f.WFC == 'P');
+        // A clock/pulse waveform returns to its idle level within the period. It
+        // may be encoded explicitly under WFC 'P' (legacy form) or, in the compact
+        // STIL form, under the drive WFCs '0'/'1' whose edges toggle (e.g. the '1'
+        // waveform D -> U -> D). Detect the first waveform with 3+ edges whose
+        // middle edge differs from its first edge.
+        var pulse = wfs.FirstOrDefault(f => f.WFC == 'P' && f.Edges.Count >= 3)
+                 ?? wfs.FirstOrDefault(IsPulse);
         bool isOut = direction == "Out";
 
         if (pulse != null && pulse.Edges.Count >= 3)
@@ -127,6 +133,22 @@ public class TimingGenerator
 
         w.WriteElementString("DataSource", "Pattern");
         w.WriteEndElement(); // PinEdge
+    }
+
+    /// <summary>A waveform is a pulse when it has three or more timed edges whose
+    /// middle (active) edge drives the pin to the opposite level before returning
+    /// (e.g. D -> U -> D or U -> D -> U). Such an entry describes a clock that must
+    /// toggle within the period rather than hold a static drive level.</summary>
+    private static bool IsPulse(WaveformDef wf)
+    {
+        if (wf.Edges.Count < 3) return false;
+        char first = wf.Edges[0].Action;
+        // Only drive actions form a togglable clock edge.
+        if (first != 'D' && first != 'U') return false;
+        char mid = wf.Edges[wf.Edges.Count / 2].Action;
+        char last = wf.Edges[^1].Action;
+        // Active edge must flip the level, and the waveform must return to idle.
+        return (mid == 'D' || mid == 'U') && mid != first && last == first;
     }
 
     private static string Eng(double v)

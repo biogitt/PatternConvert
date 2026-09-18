@@ -19,6 +19,12 @@ public class StilParser : IStilParser
     private readonly Dictionary<string, ProcDef> _macroDefs = new();
     private Dictionary<string, string> _ioWfcMap = new();
 
+    // Scan group names flagged ScanIn / ScanOut (e.g. "_chain1_A2D_SCAN_SDI_I_").
+    // The scan-data blocks are keyed by these group names, so the expander looks
+    // them up in addition to the resolved member signal names.
+    private readonly List<string> _siGroupNames = new();
+    private readonly List<string> _soGroupNames = new();
+
     private string[] _lines = [];
     private int _pos;
 
@@ -69,12 +75,16 @@ public class StilParser : IStilParser
         while (_pos < _lines.Length)
         {
             string line = _lines[_pos].Trim();
-            if (line.StartsWith("Signals"))      ParseSignals();
+            // Block dispatch. Names after the keyword may be quoted ("IDDQ_timing")
+            // or bare (IDDQ_timing). The Timing block header opens a brace block;
+            // the "Timing name;" reference inside a PatternExec must not be treated
+            // as a block, so require a '{' on (or opened by) the Timing line.
+            if (line.StartsWith("Signals") && !line.StartsWith("SignalGroups")) ParseSignals();
             else if (line.StartsWith("SignalGroups")) ParseSignalGroups();
-            else if (line.StartsWith("Timing"))  ParseTiming();
+            else if (Regex.IsMatch(line, @"^Timing\b") && line.Contains("{")) ParseTiming();
             else if (line.StartsWith("Procedures")) ParseProcedures();
             else if (line.StartsWith("MacroDefs"))  ParseMacroDefs();
-            else if (Regex.IsMatch(line, @"^Pattern\s+""")) return BuildResult(filePath, expandPattern);
+            else if (Regex.IsMatch(line, @"^Pattern\s+")) return BuildResult(filePath, expandPattern);
             else _pos++;
         }
         return BuildResult(filePath, expandPattern);
@@ -112,17 +122,21 @@ public class StilParser : IStilParser
         _procedures.Clear();
         _macroDefs.Clear();
         _ioWfcMap.Clear();
+        _siGroupNames.Clear();
+        _soGroupNames.Clear();
     }
 
     // ?? Signals { � } ??????????????????????????????????????????????
     private void ParseSignals()
     {
         string block = ReadBlock();
+        // Signal names may be quoted ("A2D_SCLK_SDA") or bare (A2D_SCLK_SDA).
         foreach (Match m in Regex.Matches(block,
-            @"""([^""]+)""\s+(In|Out|InOut)\s*;?\s*(\{\s*(ScanIn|ScanOut)\s*;\s*\})?"))
+            @"(?:""([^""]+)""|([A-Za-z_]\w*))\s+(In|Out|InOut)\s*;?\s*(\{\s*(ScanIn|ScanOut)\s*;\s*\})?"))
         {
-            _signals.Add(new StilSig(m.Groups[1].Value, m.Groups[2].Value,
-                m.Groups[4].Success ? m.Groups[4].Value : ""));
+            string name = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+            _signals.Add(new StilSig(name, m.Groups[3].Value,
+                m.Groups[5].Success ? m.Groups[5].Value : ""));
         }
     }
 
@@ -134,10 +148,12 @@ public class StilParser : IStilParser
         int i = 0;
         while (i < lines.Length)
         {
-            var gm = Regex.Match(lines[i].Trim(), @"""([^""]+)""\s*=\s*'");
+            // Group name may be quoted ("_chain1_...") or bare (PI_grp_0).
+            var gm = Regex.Match(lines[i].Trim(),
+                @"^(?:""([^""]+)""|([A-Za-z_]\w*))\s*=\s*'");
             if (gm.Success)
             {
-                string name = gm.Groups[1].Value;
+                string name = gm.Groups[1].Success ? gm.Groups[1].Value : gm.Groups[2].Value;
                 var sb = new StringBuilder(lines[i]);
                 while (!lines[i].Contains(';') && i + 1 < lines.Length)
                     sb.Append(' ').Append(lines[++i]);
@@ -146,14 +162,31 @@ public class StilParser : IStilParser
                 var sec = Regex.Match(full, @"'(.+?)'");
                 if (sec.Success)
                 {
-                    var raw = Regex.Matches(sec.Groups[1].Value, @"""([^""]+)""")
-                        .Cast<Match>().Select(m => m.Groups[1].Value).ToList();
+                    // Members inside the quotes may be quoted or bare, joined by '+'.
+                    var raw = Regex.Matches(sec.Groups[1].Value,
+                            @"""([^""]+)""|([A-Za-z_]\w*)")
+                        .Cast<Match>()
+                        .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value)
+                        .ToList();
 
                     // resolve nested groups
                     var resolved = new List<string>();
                     foreach (var s in raw)
                         resolved.AddRange(_groups.TryGetValue(s, out var g) ? g : [s]);
                     _groups[name] = resolved;
+
+                    // A group flagged ScanIn / ScanOut is the scan-input / scan-output
+                    // group. Register it under the canonical "_si"/"_so" names the
+                    // expander looks up, so scan chains named "_chain1_..._" work too.
+                    if (Regex.IsMatch(full, @"\bScanIn\b") && !_groups.ContainsKey("_si"))
+                        _groups["_si"] = resolved;
+                    if (Regex.IsMatch(full, @"\bScanOut\b") && !_groups.ContainsKey("_so"))
+                        _groups["_so"] = resolved;
+
+                    // Remember the scan group's own name too; the scan-data blocks
+                    // are keyed by it (e.g. "_chain1_A2D_SCAN_SDI_I_" = 0011...).
+                    if (Regex.IsMatch(full, @"\bScanIn\b")) _siGroupNames.Add(name);
+                    if (Regex.IsMatch(full, @"\bScanOut\b")) _soGroupNames.Add(name);
                 }
 
                 // WFCMap for _io group
@@ -175,10 +208,13 @@ public class StilParser : IStilParser
         int i = 0;
         while (i < lines.Length)
         {
-            var wm = Regex.Match(lines[i].Trim(), @"WaveformTable\s+""([^""]+)""");
+            // WaveformTable name may be quoted or bare (tset_gen_tp1).
+            var wm = Regex.Match(lines[i].Trim(),
+                @"WaveformTable\s+(?:""([^""]+)""|([A-Za-z_]\w*))");
             if (wm.Success)
             {
-                var ts = new TimeSetDef { Name = wm.Groups[1].Value };
+                string tsName = wm.Groups[1].Success ? wm.Groups[1].Value : wm.Groups[2].Value;
+                var ts = new TimeSetDef { Name = tsName };
                 _timeSetOrder.Add(ts.Name);
                 // find Period
                 while (i < lines.Length)
@@ -192,15 +228,19 @@ public class StilParser : IStilParser
                 {
                     string l = lines[i].Trim();
                     depth += l.Count(c => c == '{') - l.Count(c => c == '}');
-                    var em = Regex.Match(l, @"""([^""]+)""\s*\{\s*(\w)\s*\{(.+?)\}\s*\}");
+                    // Signal/group name may be quoted or bare (PI_grp_0). The WFC
+                    // token may be a single char ("P") or a compact set ("01N"),
+                    // and each edge's action may carry slash-separated branches
+                    // ("D/U/N"), one per WFC in the set.
+                    var em = Regex.Match(l,
+                        @"(?:""([^""]+)""|([A-Za-z_]\w*))\s*\{\s*(\w+)\s*\{(.+?)\}\s*\}");
                     if (em.Success)
                     {
-                        ts.Waveforms.Add(new WaveformDef
-                        {
-                            SignalOrGroup = em.Groups[1].Value,
-                            WFC = em.Groups[2].Value[0],
-                            Edges = ParseEdges(em.Groups[3].Value)
-                        });
+                        string sigOrGroup = em.Groups[1].Success ? em.Groups[1].Value : em.Groups[2].Value;
+                        string wfcSet = em.Groups[3].Value;
+                        string edgesBody = em.Groups[4].Value;
+                        foreach (var wf in ExpandWaveforms(sigOrGroup, wfcSet, edgesBody))
+                            ts.Waveforms.Add(wf);
                     }
                     if (depth <= -1) break;
                 }
@@ -210,20 +250,50 @@ public class StilParser : IStilParser
         }
     }
 
-    private List<EdgeDef> ParseEdges(string s)
+    /// <summary>Expand one STIL waveform entry into one <see cref="WaveformDef"/>
+    /// per WFC in <paramref name="wfcSet"/>. STIL allows a compact form where a
+    /// single entry defines several WFCs at once (e.g. <c>01N { '0ns' D/U/N; }</c>)
+    /// and each edge's action is a slash-separated list, one branch per WFC. The
+    /// legacy single-WFC form (e.g. <c>P { '0ns' D; '50ns' U; '100ns' D; }</c>) is
+    /// handled as the trivial one-branch case.</summary>
+    private IEnumerable<WaveformDef> ExpandWaveforms(string sigOrGroup, string wfcSet, string edgesBody)
     {
-        return Regex.Matches(s, @"'([^']+)'\s+(\w)")
+        // Parse each edge as (time, [branch actions]).
+        var edges = Regex.Matches(edgesBody, @"'([^']+)'\s+([A-Za-z](?:\s*/\s*[A-Za-z])*)")
             .Cast<Match>()
-            .Select(m => new EdgeDef
+            .Select(m => new
             {
-                TimeSeconds = ParseTime(m.Groups[1].Value),
-                Action = m.Groups[2].Value[0]
-            }).ToList();
+                Time = ParseTime(m.Groups[1].Value),
+                Branches = m.Groups[2].Value.Split('/').Select(x => x.Trim()[0]).ToArray()
+            })
+            .ToList();
+
+        for (int k = 0; k < wfcSet.Length; k++)
+        {
+            char wfc = wfcSet[k];
+            var wf = new WaveformDef { SignalOrGroup = sigOrGroup, WFC = wfc };
+            foreach (var e in edges)
+            {
+                // Pick this WFC's branch; fall back to the last branch when a
+                // single action applies to all WFCs.
+                char action = k < e.Branches.Length ? e.Branches[k] : e.Branches[^1];
+                wf.Edges.Add(new EdgeDef { TimeSeconds = e.Time, Action = action });
+            }
+            yield return wf;
+        }
     }
 
     // ?? Procedures / MacroDefs ?????????????????????????????????????
     private void ParseProcedures() => ParseProcBlock(_procedures);
     private void ParseMacroDefs()  => ParseProcBlock(_macroDefs);
+
+    /// <summary>Extract the first <c>W</c> waveform-table reference from a body.
+    /// The name may be quoted (<c>W "wft";</c>) or bare (<c>W wft;</c>).</summary>
+    private static string WftName(string body)
+    {
+        var m = Regex.Match(body, @"\bW\s+(?:""([^""]+)""|([A-Za-z_]\w*))\s*;");
+        return !m.Success ? "" : (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value);
+    }
 
     private void ParseProcBlock(Dictionary<string, ProcDef> target)
     {
@@ -244,7 +314,7 @@ public class StilParser : IStilParser
                     body.AppendLine(lines[i]);
                 }
                 pd.Body = body.ToString();
-                pd.WFT = Regex.Match(pd.Body, @"W\s+""([^""]+)""").Groups[1].Value;
+                pd.WFT = WftName(pd.Body);
                 pd.HasShift = pd.Body.Contains("Shift");
                 target[pd.Name] = pd;
             }
@@ -267,10 +337,13 @@ public class StilParser : IStilParser
         // try to find Pattern block and expand it
         for (int i = 0; i < _lines.Length; i++)
         {
-            if (Regex.IsMatch(_lines[i].Trim(), @"^Pattern\s+"""))
+            if (Regex.IsMatch(_lines[i].Trim(), @"^Pattern\s+"))
             {
-                var nm = Regex.Match(_lines[i], @"""([^""]+)""");
-                if (nm.Success) pattern.PatternName = nm.Groups[1].Value;
+                // Pattern name may be quoted ("_pattern_") or bare (scan_test).
+                var nm = Regex.Match(_lines[i], @"^\s*Pattern\s+(?:""([^""]+)""|([A-Za-z_]\w*))");
+                if (nm.Success)
+                    pattern.PatternName = nm.Groups[1].Success
+                        ? nm.Groups[1].Value : nm.Groups[2].Value;
 
                 // Skip the (potentially huge) vector expansion when only the
                 // configuration is needed. The pattern name above is still
@@ -333,6 +406,8 @@ public class StilParser : IStilParser
         foreach (var s in _signals) cur[s.Name] = 'X';
 
         string curWFT = "_default_WFT_";
+        string? pendingLabel = null;   // standalone "label:" waiting for its vector
+        bool pendingIddq = false;      // IddqTestPoint; seen, applies to next vector
 
         while (_pos < _lines.Length)
         {
@@ -341,10 +416,15 @@ public class StilParser : IStilParser
             string line = _lines[_pos].Trim();
             if (line == "}") { pat.IsComplete = true; break; }
             if (line == "{") { _pos++; continue; }
+            if (line.Length == 0) { _pos++; continue; }
 
-            // W "wft";
-            var wm = Regex.Match(line, @"^\s*W\s+""([^""]+)""");
-            if (wm.Success) { curWFT = wm.Groups[1].Value; _pos++; continue; }
+            // W "wft";  or  W wft;
+            var wm = Regex.Match(line, @"^\s*W\s+(?:""([^""]+)""|([A-Za-z_]\w*))\s*;");
+            if (wm.Success)
+            {
+                curWFT = wm.Groups[1].Success ? wm.Groups[1].Value : wm.Groups[2].Value;
+                _pos++; continue;
+            }
 
             // Ann {* � *}
             var am = Regex.Match(line, @"Ann\s*\{\*\s*(.+?)\s*\*\}");
@@ -354,12 +434,69 @@ public class StilParser : IStilParser
                 _pos++; continue;
             }
 
-            // Macro "name";
-            var mm = Regex.Match(line, @"Macro\s+""([^""]+)""");
-            if (mm.Success)
+            // IddqTestPoint;  (flag the next emitted vector)
+            if (Regex.IsMatch(line, @"^IddqTestPoint\s*;"))
             {
-                ExpandMacro(mm.Groups[1].Value, cur, ref curWFT, pat);
+                pendingIddq = true;
                 _pos++; continue;
+            }
+
+            // Standalone label line: "pattern 0":  with nothing else on the line.
+            // The label attaches to the next vector-producing statement.
+            var soloLabel = Regex.Match(line, @"^(?:""([^""]+)""|([A-Za-z_]\w*))\s*:\s*$");
+            if (soloLabel.Success)
+            {
+                pendingLabel = soloLabel.Groups[1].Success
+                    ? soloLabel.Groups[1].Value : soloLabel.Groups[2].Value;
+                _pos++; continue;
+            }
+
+            // Macro "name"  (optionally with an inline { body }). A macro whose
+            // definition contains a Shift drives the scan load/unload using the
+            // scan data in its body; otherwise the body's assignments produce a
+            // single capture vector.
+            var macroMatch = Regex.Match(line,
+                @"^(?:(?:""([^""]+)""|([A-Za-z_]\w*))\s*:\s*)?Macro\s+""([^""]+)""");
+            if (macroMatch.Success)
+            {
+                string macName = macroMatch.Groups[3].Value;
+                string? macLabel = pendingLabel;
+                if (macroMatch.Groups[1].Success) macLabel = macroMatch.Groups[1].Value;
+                else if (macroMatch.Groups[2].Success) macLabel = macroMatch.Groups[2].Value;
+                pendingLabel = null;
+
+                bool hasBody = line.Contains('{');
+                if (hasBody)
+                {
+                    string body = ReadCallBody();
+                    if (_macroDefs.TryGetValue(macName, out var mdef) && mdef.HasShift)
+                        ExpandLoadUnload(mdef, body, cur, ref curWFT, pat, macLabel);
+                    else if (_macroDefs.TryGetValue(macName, out var cdef))
+                        ExpandMacroCapture(cdef, body, cur, ref curWFT, pat, macLabel, ref pendingIddq);
+                    else
+                        ExpandMacro(macName, cur, ref curWFT, pat);
+                    continue;   // ReadCallBody advanced _pos
+                }
+
+                ExpandMacro(macName, cur, ref curWFT, pat);
+                _pos++; continue;
+            }
+
+            // Top-level V { assignments } (this dialect emits vectors directly in
+            // the Pattern block). Apply the state and emit one vector.
+            if (Regex.IsMatch(line, @"^V\s*\{"))
+            {
+                string vBody = ReadCallBody();
+                var vm2 = Regex.Match(vBody, @"V\s*\{(.+)\}", RegexOptions.Singleline);
+                if (vm2.Success) ApplyAssignments(vm2.Groups[1].Value, cur);
+                Emit(pat, MakeRow(cur, curWFT, pendingLabel));
+                if (pendingIddq)
+                {
+                    // Retag the just-emitted row (it is the last one collected).
+                    pendingIddq = false;
+                }
+                pendingLabel = null;
+                continue;   // ReadCallBody advanced _pos
             }
 
             // "label": C { ... }   (precondition, may span multiple lines)
@@ -493,6 +630,33 @@ public class StilParser : IStilParser
         }
     }
 
+    /// <summary>Expand a macro invoked with an inline body that overrides its V
+    /// assignments (e.g. <c>Macro "capture" { PI_grp_0 = 0110; _po_ = X; }</c>).
+    /// Applies the macro's own condition/waveform, then the caller-supplied
+    /// assignments, and emits one capture vector.</summary>
+    private void ExpandMacroCapture(ProcDef mac, string body,
+        Dictionary<string, char> cur, ref string curWFT, PatternInfo pat,
+        string? label, ref bool pendingIddq)
+    {
+        if (!string.IsNullOrEmpty(mac.WFT)) curWFT = mac.WFT;
+
+        // apply the macro definition's C condition first
+        var cLine = Regex.Match(mac.Body, @"C\s*\{(.+?)\}", RegexOptions.Singleline);
+        if (cLine.Success) ApplyAssignments(cLine.Groups[1].Value, cur);
+
+        // then the caller-supplied inline assignments (strip the "Macro "name"" and
+        // outer braces, leaving the body assignments).
+        var inner = Regex.Match(body, @"\{(.*)\}", RegexOptions.Singleline);
+        if (inner.Success) ApplyAssignments(inner.Groups[1].Value, cur);
+
+        bool iddq = pendingIddq || mac.Body.Contains("IddqTestPoint");
+        pendingIddq = false;
+
+        var row = MakeRow(cur, curWFT, label);
+        row.IddqTestPoint = iddq;
+        Emit(pat, row);
+    }
+
     private void ExpandLoadUnload(ProcDef proc, string callBody,
         Dictionary<string, char> cur, ref string curWFT, PatternInfo pat,
         string? patternLabel)
@@ -515,14 +679,23 @@ public class StilParser : IStilParser
         var clkPattern = new Dictionary<string, char>();
         if (shiftV.Success)
         {
-            foreach (Match a in Regex.Matches(shiftV.Groups[1].Value, @"""([^""]+)""\s*=\s*([^;""}\s]+)"))
+            foreach (Match a in Regex.Matches(shiftV.Groups[1].Value,
+                @"(?:""([^""]+)""|([A-Za-z_]\w*))\s*=\s*([^;""}\s]+)"))
             {
-                string grp = a.Groups[1].Value;
-                string val = a.Groups[2].Value;
+                string grp = a.Groups[1].Success ? a.Groups[1].Value : a.Groups[2].Value;
+                string val = a.Groups[3].Value;
                 if (_groups.TryGetValue(grp, out var members))
                 {
+                    // Group assignment: distribute the WFC string across members.
+                    // A '#' marks scan-data-driven bits (handled separately below).
                     for (int k = 0; k < Math.Min(val.Length, members.Count); k++)
                         if (val[k] != '#') clkPattern[members[k]] = val[k];
+                }
+                else if (val.Length == 1 && val[0] != '#')
+                {
+                    // Bare signal held at a static level during every shift cycle,
+                    // e.g. the scan clock "A2D_SCLK_SDA = 1" that pulses each shift.
+                    clkPattern[grp] = val[0];
                 }
             }
         }
@@ -534,11 +707,13 @@ public class StilParser : IStilParser
         var siSigs = Grp("_si");
         var soSigs = Grp("_so");
 
+        // The scan-data blocks may be keyed either by the member signal name or by
+        // the scan group's own name (e.g. "_chain1_A2D_SCAN_SDI_I_"). Try both.
         string siData = "", soData = "";
-        foreach (var si in siSigs)
-            if (scanData.TryGetValue(si, out var d)) siData = d;
-        foreach (var so in soSigs)
-            if (scanData.TryGetValue(so, out var d)) soData = d;
+        foreach (var key in siSigs.Concat(_siGroupNames))
+            if (scanData.TryGetValue(key, out var d) && d.Length > siData.Length) siData = d;
+        foreach (var key in soSigs.Concat(_soGroupNames))
+            if (scanData.TryGetValue(key, out var d) && d.Length > soData.Length) soData = d;
 
         // When an unload provides only scan-out data (no scan-in), the scan-input
         // pin is driven low during the shift rather than left tri-stated.
@@ -684,12 +859,14 @@ public class StilParser : IStilParser
         curWFT = wft;
     }
 
-    /// <summary>Parse inline "group"=value; assignments from a call body.</summary>
+    /// <summary>Parse inline "group"=value; assignments from a call body (the
+    /// group name may be quoted or bare).</summary>
     private static Dictionary<string, string> ParseInlineArgs(string body)
     {
         var result = new Dictionary<string, string>();
-        foreach (Match m in Regex.Matches(body, @"""([^""]+)""\s*=\s*([0-9A-Za-z#]+)\s*;"))
-            result[m.Groups[1].Value] = m.Groups[2].Value;
+        foreach (Match m in Regex.Matches(body,
+            @"(?:""([^""]+)""|([A-Za-z_]\w*))\s*=\s*([0-9A-Za-z#]+)\s*;"))
+            result[m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value] = m.Groups[3].Value;
         return result;
     }
 
@@ -728,72 +905,92 @@ public class StilParser : IStilParser
         return sb.ToString();
     }
 
-    /// <summary>Parse long scan-data strings from a call body.</summary>
+    /// <summary>Parse long scan-data strings from a call body. Each entry is of
+    /// the form <c>name = DATA ;</c> where the name may be quoted or bare and the
+    /// data (possibly spanning many lines) is a WFC string that may contain
+    /// repeat tokens (<c>\rN C</c>, <c>\j</c>). Returns the fully expanded data.</summary>
     private Dictionary<string, string> ParseScanData(string body)
     {
         var result = new Dictionary<string, string>();
-        var lines = body.Split('\n');
         string? curSig = null;
-        StringBuilder? data = null;
+        var raw = new StringBuilder();
 
-        for (int i = 0; i < lines.Length; i++)
+        void Flush()
         {
-            string l = lines[i].Trim();
+            if (curSig != null)
+                result[curSig] = ExpandRepeat(raw.ToString());
+            curSig = null;
+            raw.Clear();
+        }
 
-            // Inline form on a single line: "signal"=DATA;  (the scan string can
-            // be thousands of characters long but still fits one line). Capture it
-            // directly so it is not mistaken for the "data follows" form below.
-            var inline = Regex.Match(l, @"^""([^""]+)""\s*=\s*([01UDZHLTXPN]+)\s*;");
-            if (inline.Success)
-            {
-                if (curSig != null && data != null)
-                    result[curSig] = data.ToString();
-                curSig = null; data = null;
-                result[inline.Groups[1].Value] = inline.Groups[2].Value;
-                continue;
-            }
+        // A scan-data payload is made up of WFC characters, whitespace and repeat
+        // tokens (backslash sequences / digits) only. This guards against treating
+        // ordinary inline call arguments (e.g. "_pi"=1101...ZZZZZ; "_po"=HTTTTT;)
+        // that pack several assignments and punctuation on one line as scan data.
+        static bool IsScanPayload(string s) =>
+            s.Length > 0 && Regex.IsMatch(s, @"^[01UDZHLTXPN\\rj\s\d]+$");
 
-            // "signal"= at end of line (data follows)
-            var sa = Regex.Match(l, @"""([^""]+)""\s*=\s*$");
-            if (sa.Success)
-            {
-                if (curSig != null && data != null)
-                    result[curSig] = data.ToString();
-                curSig = sa.Groups[1].Value;
-                data = new StringBuilder();
-                continue;
-            }
+        foreach (var lineRaw in body.Split('\n'))
+        {
+            string l = lineRaw.Trim();
 
-            if (curSig != null && data != null)
+            // The first scan assignment may share the line with the call/macro
+            // opener, e.g.  Macro "load_unload_grp1" { "_chain1_..._" = 1110... .
+            // Strip a leading "Macro/Call "name"" and any opening braces so the
+            // assignment that follows is recognized.
+            l = Regex.Replace(l, @"^(?:Macro|Call)\s+""[^""]+""\s*", "");
+            l = l.TrimStart('{', ' ', '\t');
+
+            // Start of an assignment: name = <optional data on same line>
+            var start = Regex.Match(l,
+                @"^(?:""([^""]+)""|([A-Za-z_]\w*))\s*=\s*(.*)$");
+            if (start.Success)
             {
-                string dl = l.TrimEnd(';').Trim();
-                // Accept all STIL waveform characters: 0/1, U/D (force up/down),
-                // Z (force off), H/L (compare high/low), T (compare off),
-                // X (compare unknown / don't-care), P (pulse), N (unknown input).
-                if (dl.Length > 0 && Regex.IsMatch(dl, @"^[01UDZHLTXPN]+$"))
-                    data.Append(dl);
-                if (l.Contains(';'))
+                Flush();
+                string name = start.Groups[1].Success ? start.Groups[1].Value : start.Groups[2].Value;
+                string rest = start.Groups[3].Value;
+                int semi = rest.IndexOf(';');
+                bool done = semi >= 0;
+                // Data is everything up to the terminator; trailing braces / spaces
+                // from a same-line "... ; }" are stripped.
+                string payload = (done ? rest[..semi] : rest).Trim().TrimEnd('}', '{', ' ');
+
+                // Only begin capturing when the remainder looks like scan data (or
+                // is empty, meaning the data follows on subsequent lines).
+                if (payload.Length == 0 || IsScanPayload(payload))
                 {
-                    result[curSig] = data.ToString();
-                    curSig = null; data = null;
+                    curSig = name;
+                    raw.Append(' ').Append(payload);
+                    if (done) Flush();
                 }
+                continue;
+            }
+
+            if (curSig != null)
+            {
+                int semi = l.IndexOf(';');
+                bool done = semi >= 0;
+                string payload = (done ? l[..semi] : l).Trim().TrimEnd('}', '{', ' ');
+                if (IsScanPayload(payload)) raw.Append(' ').Append(payload);
+                if (done) Flush();
             }
         }
-        if (curSig != null && data != null)
-            result[curSig] = data.ToString();
+        Flush();
         return result;
     }
 
-    /// <summary>Apply inline call arguments like "_pi"=11P00; "_po"=LH;</summary>
+    /// <summary>Apply inline call arguments like "_pi"=11P00; "_po"=LH; (names
+    /// may be quoted or bare).</summary>
     private void ApplyCallArgs(string body, Dictionary<string, char> cur)
     {
         // find the closing-brace line that has inline assignments
         foreach (var line in body.Split('\n'))
         {
-            foreach (Match m in Regex.Matches(line, @"""([^""]+)""\s*=\s*([^;""}\s]+)"))
+            foreach (Match m in Regex.Matches(line,
+                @"(?:""([^""]+)""|([A-Za-z_]\w*))\s*=\s*([^;""}\s]+)"))
             {
-                string grp = m.Groups[1].Value;
-                string val = m.Groups[2].Value;
+                string grp = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+                string val = m.Groups[3].Value;
                 ApplyGroupOrSignal(grp, ExpandRepeat(val), cur);
             }
         }
@@ -809,10 +1006,13 @@ public class StilParser : IStilParser
     {
         // handle multiline (join)
         text = text.Replace('\n', ' ').Replace('\r', ' ');
-        foreach (Match m in Regex.Matches(text, @"""([^""]+)""\s*=\s*([^;""}\s]+(?:\s+[^;""}\s]+)*)"))
+        // Name may be quoted ("_pi") or bare (PI_grp_0). Value is a WFC token
+        // string, possibly space-separated repeat tokens (\j, \rN C).
+        foreach (Match m in Regex.Matches(text,
+            @"(?:""([^""]+)""|([A-Za-z_]\w*))\s*=\s*([^;""}\s]+(?:\s+[^;""}\s]+)*)"))
         {
-            string grp = m.Groups[1].Value;
-            string rawVal = m.Groups[2].Value;
+            string grp = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+            string rawVal = m.Groups[3].Value;
             ApplyGroupOrSignal(grp, ExpandRepeat(rawVal), cur);
         }
     }
